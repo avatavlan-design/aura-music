@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Aura Music</string>
+    <string name="widget_large_desc">Aura Music Large Player (Album Art, Song, Artist, Genre &amp; Controls)</string>
+    <string name="widget_medium_desc">Aura Music Medium Player (Album Art, Song, Artist &amp; Controls)</string>
+    <string name="widget_small_desc">Aura Music Small Player (Album Art &amp; Play/Pause)</string>
+    <string name="widget_tiny_desc">Aura Music Tiny Button (Play/Pause)</string>
+</resources>

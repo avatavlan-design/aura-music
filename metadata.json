@@ -1,0 +1,6 @@
+{
+  "name": "Aura Music",
+  "description": "Gapless offline music player with seamless preloading, ID3 tag library sorting, swipe-to-queue, and folder management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
