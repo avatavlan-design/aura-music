@@ -15,7 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -262,7 +262,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                                             modifier = Modifier.padding(12.dp),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Icon(Icons.Default.PlaylistAdd, contentDescription = null)
+                                            Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = null)
                                             Spacer(modifier = Modifier.size(8.dp))
                                             Text(pl.name, fontWeight = FontWeight.SemiBold)
                                         }

@@ -1,9 +1,6 @@
 package com.example.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,13 +15,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -35,7 +33,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,6 +49,26 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Track
+import kotlinx.coroutines.delay
+
+/**
+ * Prevents horizontal swipe gestures during vertical scrolling and for [cooldownMs] afterwards.
+ */
+@Composable
+fun rememberScrollCooldown(listState: LazyListState, cooldownMs: Long = 450L): Boolean {
+    val isScrolling by remember { derivedStateOf { listState.isScrollInProgress } }
+    var cooldownActive by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isScrolling) {
+        if (isScrolling) {
+            cooldownActive = true
+        } else {
+            delay(cooldownMs)
+            cooldownActive = false
+        }
+    }
+    return !cooldownActive
+}
 
 @Composable
 fun SwipeToQueueTrackItem(
@@ -56,37 +79,47 @@ fun SwipeToQueueTrackItem(
     onQueue: (Track) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onAddToPlaylistClick: (() -> Unit)? = null,
+    isSwipeEnabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val dismissState = rememberSwipeToDismissBoxState(
+        positionalThreshold = { totalDistance -> totalDistance * 0.45f },
         confirmValueChange = { dismissValue ->
-            when (dismissValue) {
-                SwipeToDismissBoxValue.StartToEnd -> {
-                    onQueue(track)
-                    false // Snap back into the list
-                }
-                SwipeToDismissBoxValue.EndToStart -> {
-                    if (onAddToPlaylistClick != null) {
-                        onAddToPlaylistClick()
-                    } else {
+            if (!isSwipeEnabled) {
+                false
+            } else {
+                when (dismissValue) {
+                    SwipeToDismissBoxValue.StartToEnd -> {
                         onQueue(track)
+                        false // Snap back into the list
                     }
-                    false // Snap back into the list
+                    SwipeToDismissBoxValue.EndToStart -> {
+                        if (onAddToPlaylistClick != null) {
+                            onAddToPlaylistClick()
+                        } else {
+                            onQueue(track)
+                        }
+                        false // Snap back into the list
+                    }
+                    else -> false
                 }
-                else -> false
             }
         }
     )
 
     SwipeToDismissBox(
         state = dismissState,
+        enableDismissFromStartToEnd = isSwipeEnabled,
+        enableDismissFromEndToStart = isSwipeEnabled,
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp)),
         backgroundContent = {
             val direction = dismissState.dismissDirection
-            val isSwiping = dismissState.targetValue != SwipeToDismissBoxValue.Settled ||
-                    dismissState.currentValue != SwipeToDismissBoxValue.Settled
+            val isSwiping = isSwipeEnabled && (
+                    dismissState.targetValue != SwipeToDismissBoxValue.Settled ||
+                            dismissState.currentValue != SwipeToDismissBoxValue.Settled
+                    )
 
             if (isSwiping) {
                 val isQueue = direction == SwipeToDismissBoxValue.StartToEnd
@@ -120,7 +153,7 @@ fun SwipeToQueueTrackItem(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(
-                            imageVector = if (isQueue) Icons.AutoMirrored.Filled.QueueMusic else Icons.Default.PlaylistAdd,
+                            imageVector = if (isQueue) Icons.AutoMirrored.Filled.QueueMusic else Icons.AutoMirrored.Filled.PlaylistAdd,
                             contentDescription = if (isQueue) "Queue track" else "Add to playlist",
                             tint = tintColor,
                             modifier = Modifier.size(24.dp)
@@ -134,7 +167,6 @@ fun SwipeToQueueTrackItem(
                     }
                 }
             } else {
-                // Completely empty when not actively dragging to prevent any visual overlap
                 Spacer(modifier = Modifier.fillMaxSize())
             }
         }
@@ -157,7 +189,6 @@ fun TrackItemContent(
     onTrackClick: () -> Unit,
     onToggleFavorite: () -> Unit
 ) {
-    // Ensure Surface is completely opaque with solid container colors so background never bleeds through
     Surface(
         color = if (isCurrentTrack) {
             MaterialTheme.colorScheme.surfaceContainerHighest

@@ -33,6 +33,7 @@ class MediaPlaybackService : MediaSessionService() {
         val player = playbackManager.exoPlayer
         val session = MediaSession.Builder(this, player).build()
         mediaSession = session
+        @Suppress("DEPRECATION")
         currentSessionToken = session.sessionCompatToken
 
         // Observe playback state to manage foreground status and lockscreen media updates

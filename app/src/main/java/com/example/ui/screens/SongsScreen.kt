@@ -173,8 +173,12 @@ fun SongsScreen(
             )
         }
 
+        val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+        val isSwipeEnabled = com.example.ui.components.rememberScrollCooldown(listState)
+
         // Track List
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -187,7 +191,8 @@ fun SongsScreen(
                     onTrackClick = { onTrackClick(track, sortedTracks, index) },
                     onQueue = onQueueTrack,
                     onToggleFavorite = onToggleFavorite,
-                    onAddToPlaylistClick = { onAddToPlaylist(track) }
+                    onAddToPlaylistClick = { onAddToPlaylist(track) },
+                    isSwipeEnabled = isSwipeEnabled
                 )
             }
         }
