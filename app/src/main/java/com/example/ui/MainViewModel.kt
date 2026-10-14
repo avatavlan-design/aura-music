@@ -19,9 +19,10 @@ import kotlinx.coroutines.launch
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val repository = MusicRepository(application, viewModelScope)
-    val playbackManager = com.example.playback.PlaybackManagerProvider.get(application)
+    val playbackManager: com.example.playback.PlaybackManager
+        get() = com.example.playback.PlaybackManagerProvider.get(getApplication())
 
-    val playbackState: StateFlow<PlaybackState> = playbackManager.playbackState
+    val playbackState: StateFlow<PlaybackState> = com.example.playback.PlaybackManagerProvider.playbackState
 
     private val _selectedTab = MutableStateFlow(LibraryTab.TRACKS)
     val selectedTab: StateFlow<LibraryTab> = _selectedTab.asStateFlow()

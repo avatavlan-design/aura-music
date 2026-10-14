@@ -15,6 +15,7 @@ import com.example.model.Track
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,18 +41,13 @@ class PlaybackManager(
         .setBackBuffer(10_000, false)
         .build()
 
-    val exoPlayer: ExoPlayer = ExoPlayer.Builder(context)
-        .setLoadControl(loadControl)
-        .setAudioAttributes(
-            AudioAttributes.Builder()
-                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                .setUsage(C.USAGE_MEDIA)
-                .build(),
-            /* handleAudioFocus = */ true
-        )
-        .setHandleAudioBecomingNoisy(true)
-        .setWakeMode(C.WAKE_MODE_LOCAL)
-        .build()
+    var isReleased: Boolean = false
+        private set
+
+    private var _exoPlayer: ExoPlayer? = null
+
+    val exoPlayer: ExoPlayer
+        get() = ensurePlayerActive()
 
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
@@ -60,15 +56,51 @@ class PlaybackManager(
     private var progressJob: Job? = null
 
     init {
-        exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
+        ensurePlayerActive()
+    }
 
-        exoPlayer.addListener(object : Player.Listener {
+    fun ensurePlayerActive(): ExoPlayer {
+        val existing = _exoPlayer
+        if (existing != null && !isReleased) {
+            return existing
+        }
+        isReleased = false
+        val newPlayer = createExoPlayer()
+        _exoPlayer = newPlayer
+        attachListeners(newPlayer)
+        return newPlayer
+    }
+
+    private fun createExoPlayer(): ExoPlayer {
+        return ExoPlayer.Builder(context)
+            .setLoadControl(loadControl)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .setUsage(C.USAGE_MEDIA)
+                    .build(),
+                true
+            )
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            .build().apply {
+                repeatMode = when (_playbackState.value.repeatMode) {
+                    RepeatMode.OFF -> Player.REPEAT_MODE_OFF
+                    RepeatMode.ALL -> Player.REPEAT_MODE_ALL
+                    RepeatMode.ONE -> Player.REPEAT_MODE_ONE
+                }
+                shuffleModeEnabled = _playbackState.value.isShuffleEnabled
+            }
+    }
+
+    private fun attachListeners(player: ExoPlayer) {
+        player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 updateCurrentTrackFromPlayer()
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                _playbackState.value = _playbackState.value.copy(isPlaying = isPlaying)
+                updateState { it.copy(isPlaying = isPlaying) }
                 if (isPlaying) {
                     startProgressTicker()
                 } else {
@@ -80,15 +112,17 @@ class PlaybackManager(
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
                     Player.STATE_READY -> {
-                        _playbackState.value = _playbackState.value.copy(
-                            durationMs = exoPlayer.duration.coerceAtLeast(0L),
-                            currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L),
-                            isGaplessPreloaded = exoPlayer.hasNextMediaItem()
-                        )
+                        updateState {
+                            it.copy(
+                                durationMs = player.duration.coerceAtLeast(0L),
+                                currentPositionMs = player.currentPosition.coerceAtLeast(0L),
+                                isGaplessPreloaded = player.hasNextMediaItem()
+                            )
+                        }
                     }
                     Player.STATE_ENDED -> {
-                        if (exoPlayer.repeatMode == Player.REPEAT_MODE_OFF && !exoPlayer.hasNextMediaItem()) {
-                            _playbackState.value = _playbackState.value.copy(isPlaying = false)
+                        if (player.repeatMode == Player.REPEAT_MODE_OFF && !player.hasNextMediaItem()) {
+                            updateState { it.copy(isPlaying = false) }
                             stopProgressTicker()
                         }
                     }
@@ -98,16 +132,25 @@ class PlaybackManager(
         })
     }
 
+    private fun updateState(transform: (PlaybackState) -> PlaybackState) {
+        val updated = transform(_playbackState.value)
+        _playbackState.value = updated
+        PlaybackManagerProvider.updateSharedState(updated)
+    }
+
     private fun startProgressTicker() {
         progressJob?.cancel()
         progressJob = scope.launch(Dispatchers.Main) {
             while (isActive) {
-                if (exoPlayer.isPlaying) {
-                    _playbackState.value = _playbackState.value.copy(
-                        currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L),
-                        durationMs = exoPlayer.duration.coerceAtLeast(0L),
-                        isGaplessPreloaded = exoPlayer.hasNextMediaItem()
-                    )
+                val player = _exoPlayer
+                if (player != null && player.isPlaying) {
+                    updateState {
+                        it.copy(
+                            currentPositionMs = player.currentPosition.coerceAtLeast(0L),
+                            durationMs = player.duration.coerceAtLeast(0L),
+                            isGaplessPreloaded = player.hasNextMediaItem()
+                        )
+                    }
                 }
                 delay(250)
             }
@@ -127,23 +170,26 @@ class PlaybackManager(
     fun playQueue(tracks: List<Track>, startIndex: Int = 0) {
         if (tracks.isEmpty()) return
 
+        val player = ensurePlayerActive()
         activeQueue = tracks
         val mediaItems = tracks.map { it.toMediaItem() }
 
-        exoPlayer.setMediaItems(mediaItems, startIndex, 0L)
-        exoPlayer.prepare()
-        exoPlayer.play()
+        player.setMediaItems(mediaItems, startIndex, 0L)
+        player.prepare()
+        player.play()
 
         val currentTrack = tracks.getOrNull(startIndex)
-        _playbackState.value = _playbackState.value.copy(
-            queue = tracks,
-            currentIndex = startIndex,
-            currentTrack = currentTrack,
-            durationMs = currentTrack?.durationMs ?: 0L,
-            currentPositionMs = 0L,
-            isPlaying = true,
-            isGaplessPreloaded = tracks.size > 1
-        )
+        updateState {
+            it.copy(
+                queue = tracks,
+                currentIndex = startIndex,
+                currentTrack = currentTrack,
+                durationMs = currentTrack?.durationMs ?: 0L,
+                currentPositionMs = 0L,
+                isPlaying = true,
+                isGaplessPreloaded = tracks.size > 1
+            )
+        }
         syncWidgetsAndNotification()
     }
 
@@ -153,12 +199,13 @@ class PlaybackManager(
      * If nothing is playing, starts playing immediately.
      */
     fun addToQueue(track: Track, playNext: Boolean = false) {
+        val player = ensurePlayerActive()
         if (activeQueue.isEmpty()) {
             playQueue(listOf(track), 0)
             return
         }
 
-        val currentIndex = exoPlayer.currentMediaItemIndex
+        val currentIndex = player.currentMediaItemIndex
         val insertIndex = if (playNext && currentIndex in activeQueue.indices) {
             currentIndex + 1
         } else {
@@ -169,114 +216,128 @@ class PlaybackManager(
         newQueue.add(insertIndex, track)
         activeQueue = newQueue
 
-        // Preload track into ExoPlayer's playback pipeline
-        exoPlayer.addMediaItem(insertIndex, track.toMediaItem())
+        player.addMediaItem(insertIndex, track.toMediaItem())
 
-        _playbackState.value = _playbackState.value.copy(
-            queue = newQueue,
-            isGaplessPreloaded = exoPlayer.hasNextMediaItem()
-        )
+        updateState {
+            it.copy(
+                queue = newQueue,
+                isGaplessPreloaded = player.hasNextMediaItem()
+            )
+        }
     }
 
     fun playPause() {
-        if (exoPlayer.isPlaying) {
-            exoPlayer.pause()
+        val player = ensurePlayerActive()
+        if (player.isPlaying) {
+            player.pause()
         } else {
-            if (exoPlayer.playbackState == Player.STATE_IDLE && activeQueue.isNotEmpty()) {
-                exoPlayer.prepare()
+            if (player.playbackState == Player.STATE_IDLE && activeQueue.isNotEmpty()) {
+                val mediaItems = activeQueue.map { it.toMediaItem() }
+                val startIdx = _playbackState.value.currentIndex.coerceIn(0, activeQueue.size - 1)
+                player.setMediaItems(mediaItems, startIdx, _playbackState.value.currentPositionMs)
+                player.prepare()
             }
-            exoPlayer.play()
+            player.play()
         }
     }
 
     fun skipToNext() {
-        if (exoPlayer.hasNextMediaItem()) {
-            exoPlayer.seekToNextMediaItem()
-            exoPlayer.play()
-        } else if (exoPlayer.repeatMode == Player.REPEAT_MODE_ALL && activeQueue.isNotEmpty()) {
-            exoPlayer.seekTo(0, 0L)
-            exoPlayer.play()
+        val player = ensurePlayerActive()
+        if (player.hasNextMediaItem()) {
+            player.seekToNextMediaItem()
+            player.play()
+        } else if (player.repeatMode == Player.REPEAT_MODE_ALL && activeQueue.isNotEmpty()) {
+            player.seekTo(0, 0L)
+            player.play()
         }
     }
 
     fun skipToPrevious() {
-        if (exoPlayer.currentPosition > 3000) {
-            exoPlayer.seekTo(0L)
-        } else if (exoPlayer.hasPreviousMediaItem()) {
-            exoPlayer.seekToPreviousMediaItem()
-            exoPlayer.play()
+        val player = ensurePlayerActive()
+        if (player.currentPosition > 3000) {
+            player.seekTo(0L)
+        } else if (player.hasPreviousMediaItem()) {
+            player.seekToPreviousMediaItem()
+            player.play()
         } else {
-            exoPlayer.seekTo(0L)
+            player.seekTo(0L)
         }
     }
 
     fun seekTo(positionMs: Long) {
-        exoPlayer.seekTo(positionMs)
-        _playbackState.value = _playbackState.value.copy(
-            currentPositionMs = positionMs
-        )
+        val player = ensurePlayerActive()
+        player.seekTo(positionMs)
+        updateState { it.copy(currentPositionMs = positionMs) }
     }
 
     fun toggleShuffle() {
+        val player = ensurePlayerActive()
         val newShuffle = !_playbackState.value.isShuffleEnabled
-        exoPlayer.shuffleModeEnabled = newShuffle
-        _playbackState.value = _playbackState.value.copy(isShuffleEnabled = newShuffle)
+        player.shuffleModeEnabled = newShuffle
+        updateState { it.copy(isShuffleEnabled = newShuffle) }
     }
 
     fun cycleRepeatMode() {
+        val player = ensurePlayerActive()
         val nextMode = when (_playbackState.value.repeatMode) {
             RepeatMode.OFF -> RepeatMode.ALL
             RepeatMode.ALL -> RepeatMode.ONE
             RepeatMode.ONE -> RepeatMode.OFF
         }
 
-        exoPlayer.repeatMode = when (nextMode) {
+        player.repeatMode = when (nextMode) {
             RepeatMode.OFF -> Player.REPEAT_MODE_OFF
             RepeatMode.ALL -> Player.REPEAT_MODE_ALL
             RepeatMode.ONE -> Player.REPEAT_MODE_ONE
         }
 
-        _playbackState.value = _playbackState.value.copy(repeatMode = nextMode)
+        updateState { it.copy(repeatMode = nextMode) }
     }
 
     fun jumpToQueueIndex(index: Int) {
+        val player = ensurePlayerActive()
         if (index in activeQueue.indices) {
-            exoPlayer.seekTo(index, 0L)
-            exoPlayer.play()
+            player.seekTo(index, 0L)
+            player.play()
         }
     }
 
     fun removeFromQueue(index: Int) {
+        val player = ensurePlayerActive()
         if (index !in activeQueue.indices) return
-        val currentIndex = exoPlayer.currentMediaItemIndex
 
         val newQueue = activeQueue.toMutableList()
         newQueue.removeAt(index)
         activeQueue = newQueue
 
-        exoPlayer.removeMediaItem(index)
+        player.removeMediaItem(index)
 
-        val updatedIndex = exoPlayer.currentMediaItemIndex
+        val updatedIndex = player.currentMediaItemIndex
         val updatedTrack = activeQueue.getOrNull(updatedIndex)
 
-        _playbackState.value = _playbackState.value.copy(
-            queue = newQueue,
-            currentIndex = updatedIndex,
-            currentTrack = updatedTrack,
-            isGaplessPreloaded = exoPlayer.hasNextMediaItem()
-        )
+        updateState {
+            it.copy(
+                queue = newQueue,
+                currentIndex = updatedIndex,
+                currentTrack = updatedTrack,
+                isGaplessPreloaded = player.hasNextMediaItem()
+            )
+        }
     }
 
     private fun updateCurrentTrackFromPlayer() {
-        val index = exoPlayer.currentMediaItemIndex
+        val player = _exoPlayer ?: return
+        val index = player.currentMediaItemIndex
         val currentTrack = activeQueue.getOrNull(index)
 
-        _playbackState.value = _playbackState.value.copy(
-            currentIndex = index,
-            currentTrack = currentTrack,
-            durationMs = exoPlayer.duration.coerceAtLeast(0L),
-            isGaplessPreloaded = exoPlayer.hasNextMediaItem()
-        )
+        updateState {
+            it.copy(
+                currentIndex = index,
+                currentTrack = currentTrack,
+                durationMs = player.duration.coerceAtLeast(0L),
+                isGaplessPreloaded = player.hasNextMediaItem()
+            )
+        }
         syncWidgetsAndNotification()
     }
 
@@ -312,9 +373,14 @@ class PlaybackManager(
     }
 
     fun release() {
+        if (isReleased) return
+        isReleased = true
         stopProgressTicker()
         MediaNotificationManager.cancelNotification(context)
-        exoPlayer.release()
+        try {
+            _exoPlayer?.release()
+        } catch (_: Exception) {}
+        _exoPlayer = null
     }
 }
 
@@ -322,13 +388,40 @@ object PlaybackManagerProvider {
     @Volatile
     private var instance: PlaybackManager? = null
 
+    private val _sharedPlaybackState = MutableStateFlow(PlaybackState())
+    val playbackState: StateFlow<PlaybackState> = _sharedPlaybackState.asStateFlow()
+
     fun get(context: Context): PlaybackManager {
-        return instance ?: synchronized(this) {
-            instance ?: PlaybackManager(
-                context.applicationContext,
-                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main + kotlinx.coroutines.SupervisorJob())
-            ).also { instance = it }
+        val current = instance
+        if (current != null && !current.isReleased) {
+            return current
+        }
+        return synchronized(this) {
+            val second = instance
+            if (second != null && !second.isReleased) {
+                second
+            } else {
+                PlaybackManager(
+                    context.applicationContext,
+                    CoroutineScope(Dispatchers.Main + SupervisorJob())
+                ).also {
+                    instance = it
+                    _sharedPlaybackState.value = it.playbackState.value
+                }
+            }
+        }
+    }
+
+    fun updateSharedState(state: PlaybackState) {
+        _sharedPlaybackState.value = state
+    }
+
+    fun reset() {
+        synchronized(this) {
+            try {
+                instance?.release()
+            } catch (_: Exception) {}
+            instance = null
         }
     }
 }
-

@@ -109,6 +109,13 @@ object MediaNotificationManager {
         val playPauseIcon = if (isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play
         val playPauseTitle = if (isPlaying) "Pause" else "Play"
 
+        val mediaStyle = androidx.media.app.NotificationCompat.MediaStyle()
+            .setShowActionsInCompactView(0, 1, 2)
+
+        MediaPlaybackService.currentSessionToken?.let { token ->
+            mediaStyle.setMediaSession(token)
+        }
+
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_widget_play)
             .setContentTitle(track.title)
@@ -117,14 +124,13 @@ object MediaNotificationManager {
             .setContentIntent(appPendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setShowWhen(false)
             .setOngoing(isPlaying)
             .addAction(R.drawable.ic_widget_prev, "Previous", prevPendingIntent)
             .addAction(playPauseIcon, playPauseTitle, playPausePendingIntent)
             .addAction(R.drawable.ic_widget_next, "Next", nextPendingIntent)
-            .setStyle(
-                androidx.media.app.NotificationCompat.MediaStyle()
-                    .setShowActionsInCompactView(0, 1, 2)
-            )
+            .setStyle(mediaStyle)
 
         if (artBitmap != null) {
             builder.setLargeIcon(artBitmap)
@@ -138,7 +144,7 @@ object MediaNotificationManager {
         manager.cancel(NOTIFICATION_ID)
     }
 
-    private suspend fun getArtworkBitmap(context: Context, track: Track): Bitmap? {
+    suspend fun getArtworkBitmap(context: Context, track: Track): Bitmap? {
         val bytes = ArtworkCache.getArtworkBytes(context, track)
         return if (bytes != null && bytes.isNotEmpty()) {
             try {
