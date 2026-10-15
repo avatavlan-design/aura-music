@@ -194,7 +194,7 @@ fun NowPlayingModalSheet(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Gapless Preloaded & Audio Format Badges
+                // Audio Format Badges
                 Row(
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
@@ -213,31 +213,6 @@ fun NowPlayingModalSheet(
                         )
                     }
 
-                    if (playbackState.isGaplessPreloaded) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF10B981).copy(alpha = 0.2f))
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF10B981))
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "0s GAPLESS ACTIVE",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF10B981)
-                                )
-                            }
-                        }
-                    }
                 }
 
                 Spacer(modifier = Modifier.weight(0.5f))

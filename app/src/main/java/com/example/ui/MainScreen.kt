@@ -73,6 +73,11 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 
     val snackbarHostState = remember { SnackbarHostState() }
     var trackForPlaylist by remember { mutableStateOf<Track?>(null) }
+    var isSubScreenActive by remember { mutableStateOf(false) }
+
+    LaunchedEffect(selectedTab) {
+        isSubScreenActive = false
+    }
 
     LaunchedEffect(snackbarMessage) {
         snackbarMessage?.let {
@@ -88,6 +93,14 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
 
     BackHandler(enabled = isSearchActive && !isNowPlayingExpanded) {
         viewModel.toggleSearch()
+    }
+
+    BackHandler(enabled = trackForPlaylist != null) {
+        trackForPlaylist = null
+    }
+
+    BackHandler(enabled = selectedTab != LibraryTab.TRACKS && !isSubScreenActive && !isNowPlayingExpanded && !isSearchActive && trackForPlaylist == null) {
+        viewModel.selectTab(LibraryTab.TRACKS)
     }
 
     Scaffold(
@@ -151,10 +164,11 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         albums = displayedAlbums,
                         currentTrackId = playbackState.currentTrack?.id,
                         isPlaying = playbackState.isPlaying,
-                        onPlayAlbumGapless = { album, index -> viewModel.playAlbumGapless(album, index) },
+                        onPlayAlbum = { album, index -> viewModel.playAlbum(album, index) },
                         onQueueTrack = { viewModel.queueTrack(it) },
                         onToggleFavorite = { viewModel.toggleFavorite(it) },
-                        onAddToPlaylist = { trackForPlaylist = it }
+                        onAddToPlaylist = { trackForPlaylist = it },
+                        onSubScreenActiveChanged = { isSubScreenActive = it }
                     )
                 }
                 LibraryTab.ARTISTS -> {
@@ -170,7 +184,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onTrackClick = { track, list, index -> viewModel.playTrack(track, list, index) },
                         onQueueTrack = { viewModel.queueTrack(it) },
                         onToggleFavorite = { viewModel.toggleFavorite(it) },
-                        onAddToPlaylist = { trackForPlaylist = it }
+                        onAddToPlaylist = { trackForPlaylist = it },
+                        onSubScreenActiveChanged = { isSubScreenActive = it }
                     )
                 }
                 LibraryTab.PLAYLISTS -> {
@@ -185,7 +200,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onTrackClick = { track, list, index -> viewModel.playTrack(track, list, index) },
                         onQueueTrack = { viewModel.queueTrack(it) },
                         onToggleFavorite = { viewModel.toggleFavorite(it) },
-                        onRemoveFromPlaylist = { plId, trId -> viewModel.removeTrackFromPlaylist(plId, trId) }
+                        onRemoveFromPlaylist = { plId, trId -> viewModel.removeTrackFromPlaylist(plId, trId) },
+                        onSubScreenActiveChanged = { isSubScreenActive = it }
                     )
                 }
                 LibraryTab.FAVORITES -> {
@@ -215,7 +231,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onRescan = { viewModel.rescanLibrary() },
                         onTrackClick = { track, list, index -> viewModel.playTrack(track, list, index) },
                         onQueueTrack = { viewModel.queueTrack(it) },
-                        onToggleFavorite = { viewModel.toggleFavorite(it) }
+                        onToggleFavorite = { viewModel.toggleFavorite(it) },
+                        onSubScreenActiveChanged = { isSubScreenActive = it }
                     )
                 }
             }

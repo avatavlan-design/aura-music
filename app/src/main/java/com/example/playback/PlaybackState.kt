@@ -12,7 +12,7 @@ data class PlaybackState(
     val currentIndex: Int = -1,
     val isShuffleEnabled: Boolean = false,
     val repeatMode: RepeatMode = RepeatMode.ALL,
-    val isGaplessPreloaded: Boolean = false
+    val isPreloaded: Boolean = false
 ) {
     val progress: Float
         get() = if (durationMs > 0) (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f

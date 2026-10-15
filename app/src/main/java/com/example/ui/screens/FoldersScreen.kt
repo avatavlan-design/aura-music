@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -39,6 +40,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,10 +71,20 @@ fun FoldersScreen(
     onTrackClick: (Track, List<Track>, Int) -> Unit,
     onQueueTrack: (Track) -> Unit,
     onToggleFavorite: (String) -> Unit,
+    onSubScreenActiveChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var selectedFolderTracks by remember { mutableStateOf<Pair<String, List<Track>>?>(null) }
+
+    val isSubActive = selectedFolderTracks != null
+    LaunchedEffect(isSubActive) {
+        onSubScreenActiveChanged(isSubActive)
+    }
+
+    BackHandler(enabled = selectedFolderTracks != null) {
+        selectedFolderTracks = null
+    }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()

@@ -97,9 +97,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playbackManager.playQueue(contextList, index)
     }
 
-    fun playAlbumGapless(album: Album, startIndex: Int = 0) {
+    fun playAlbum(album: Album, startIndex: Int = 0) {
         playbackManager.playQueue(album.tracks, startIndex)
-        _snackbarMessage.value = "Playing ${album.title} (0-Delay Gapless Active)"
+        _snackbarMessage.value = "Playing ${album.title}"
     }
 
     fun queueTrack(track: Track) {

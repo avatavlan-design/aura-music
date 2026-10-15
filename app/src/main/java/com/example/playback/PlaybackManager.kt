@@ -29,7 +29,7 @@ class PlaybackManager(
 ) {
     private val TAG = "PlaybackManager"
 
-    // Tuned LoadControl for aggressive seamless preloading and 0-delay gapless playback
+    // Tuned LoadControl for aggressive seamless preloading
     private val loadControl = DefaultLoadControl.Builder()
         .setBufferDurationsMs(
             /* minBufferMs = */ 15_000,
@@ -116,7 +116,7 @@ class PlaybackManager(
                             it.copy(
                                 durationMs = player.duration.coerceAtLeast(0L),
                                 currentPositionMs = player.currentPosition.coerceAtLeast(0L),
-                                isGaplessPreloaded = player.hasNextMediaItem()
+                                isPreloaded = player.hasNextMediaItem()
                             )
                         }
                     }
@@ -148,7 +148,7 @@ class PlaybackManager(
                         it.copy(
                             currentPositionMs = player.currentPosition.coerceAtLeast(0L),
                             durationMs = player.duration.coerceAtLeast(0L),
-                            isGaplessPreloaded = player.hasNextMediaItem()
+                            isPreloaded = player.hasNextMediaItem()
                         )
                     }
                 }
@@ -164,8 +164,7 @@ class PlaybackManager(
 
     /**
      * Plays a list of tracks (e.g. an album or playlist) starting at startIndex.
-     * All tracks are queued directly into ExoPlayer so the next track is pre-buffered
-     * and transitions with 0 delay (gapless).
+     * All tracks are queued directly into ExoPlayer so the next track is pre-buffered.
      */
     fun playQueue(tracks: List<Track>, startIndex: Int = 0) {
         if (tracks.isEmpty()) return
@@ -187,7 +186,7 @@ class PlaybackManager(
                 durationMs = currentTrack?.durationMs ?: 0L,
                 currentPositionMs = 0L,
                 isPlaying = true,
-                isGaplessPreloaded = tracks.size > 1
+                isPreloaded = tracks.size > 1
             )
         }
         syncWidgetsAndNotification()
@@ -221,7 +220,7 @@ class PlaybackManager(
         updateState {
             it.copy(
                 queue = newQueue,
-                isGaplessPreloaded = player.hasNextMediaItem()
+                isPreloaded = player.hasNextMediaItem()
             )
         }
     }
@@ -320,7 +319,7 @@ class PlaybackManager(
                 queue = newQueue,
                 currentIndex = updatedIndex,
                 currentTrack = updatedTrack,
-                isGaplessPreloaded = player.hasNextMediaItem()
+                isPreloaded = player.hasNextMediaItem()
             )
         }
     }
@@ -335,7 +334,7 @@ class PlaybackManager(
                 currentIndex = index,
                 currentTrack = currentTrack,
                 durationMs = player.duration.coerceAtLeast(0L),
-                isGaplessPreloaded = player.hasNextMediaItem()
+                isPreloaded = player.hasNextMediaItem()
             )
         }
         syncWidgetsAndNotification()

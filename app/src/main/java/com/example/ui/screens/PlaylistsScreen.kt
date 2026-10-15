@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -41,6 +42,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,12 +72,30 @@ fun PlaylistsScreen(
     onQueueTrack: (Track) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onRemoveFromPlaylist: (String, String) -> Unit,
+    onSubScreenActiveChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedPlaylist by remember { mutableStateOf<Playlist?>(null) }
     var showCreateDialog by remember { mutableStateOf(false) }
     var newPlaylistTitle by remember { mutableStateOf("") }
     var playlistToDelete by remember { mutableStateOf<Playlist?>(null) }
+
+    val isSubActive = selectedPlaylist != null || showCreateDialog || playlistToDelete != null
+    LaunchedEffect(isSubActive) {
+        onSubScreenActiveChanged(isSubActive)
+    }
+
+    BackHandler(enabled = showCreateDialog) {
+        showCreateDialog = false
+    }
+
+    BackHandler(enabled = playlistToDelete != null) {
+        playlistToDelete = null
+    }
+
+    BackHandler(enabled = selectedPlaylist != null) {
+        selectedPlaylist = null
+    }
 
     val m3uPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()

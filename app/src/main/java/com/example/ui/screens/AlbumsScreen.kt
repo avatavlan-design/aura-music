@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -75,15 +76,29 @@ fun AlbumsScreen(
     albums: List<Album>,
     currentTrackId: String?,
     isPlaying: Boolean,
-    onPlayAlbumGapless: (Album, Int) -> Unit,
+    onPlayAlbum: (Album, Int) -> Unit,
     onQueueTrack: (Track) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onAddToPlaylist: (Track) -> Unit,
+    onSubScreenActiveChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedAlbum by remember { mutableStateOf<Album?>(null) }
     var showRandomDialog by remember { mutableStateOf(false) }
     var randomSelection by remember { mutableStateOf<List<Album>>(emptyList()) }
+
+    val isSubActive = selectedAlbum != null || showRandomDialog
+    LaunchedEffect(isSubActive) {
+        onSubScreenActiveChanged(isSubActive)
+    }
+
+    BackHandler(enabled = showRandomDialog) {
+        showRandomDialog = false
+    }
+
+    BackHandler(enabled = selectedAlbum != null) {
+        selectedAlbum = null
+    }
 
     fun refreshRandomSelection() {
         if (albums.isNotEmpty()) {
@@ -102,7 +117,7 @@ fun AlbumsScreen(
             currentTrackId = currentTrackId,
             isPlaying = isPlaying,
             onBack = { selectedAlbum = null },
-            onPlayAlbum = { index -> onPlayAlbumGapless(album, index) },
+            onPlayAlbum = { index -> onPlayAlbum(album, index) },
             onQueueTrack = onQueueTrack,
             onToggleFavorite = onToggleFavorite,
             onAddToPlaylist = onAddToPlaylist
@@ -451,6 +466,10 @@ fun AlbumDetailView(
     onToggleFavorite: (String) -> Unit,
     onAddToPlaylist: (Track) -> Unit
 ) {
+    BackHandler {
+        onBack()
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         // Back Header
         Row(
@@ -513,26 +532,10 @@ fun AlbumDetailView(
                             color = MaterialTheme.colorScheme.outline
                         )
 
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        // Seamless Gapless Album Badge
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(Color(0xFF10B981).copy(alpha = 0.2f))
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = "✓ 0-Delay Seamless Gapless",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF10B981)
-                            )
-                        }
                     }
                 }
 
-                // Play Gapless Album CTA Button
+                // Play Album CTA Button
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -543,12 +546,12 @@ fun AlbumDetailView(
                         onClick = { onPlayAlbum(0) },
                         modifier = Modifier
                             .weight(1f)
-                            .testTag("play_album_gapless_button"),
+                            .testTag("play_album_button"),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null)
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Play Gapless Album")
+                        Text("Play Album")
                     }
 
                     FilledTonalButton(

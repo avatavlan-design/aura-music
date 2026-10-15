@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,9 +55,19 @@ fun ArtistsScreen(
     onQueueTrack: (Track) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onAddToPlaylist: (Track) -> Unit,
+    onSubScreenActiveChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedArtist by remember { mutableStateOf<Artist?>(null) }
+
+    val isSubActive = selectedArtist != null
+    LaunchedEffect(isSubActive) {
+        onSubScreenActiveChanged(isSubActive)
+    }
+
+    BackHandler(enabled = selectedArtist != null) {
+        selectedArtist = null
+    }
 
     if (selectedArtist != null) {
         val artist = selectedArtist!!
