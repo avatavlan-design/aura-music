@@ -97,6 +97,25 @@ object SampleAudioGenerator {
             )
         }
 
+        // Ensure a built-in sample .m3u playlist exists for offline testing and immediate discovery
+        try {
+            val sampleM3u = File(sampleDir, "Aura_Chill_Odyssey.m3u")
+            if (!sampleM3u.exists()) {
+                val m3uContent = buildString {
+                    appendLine("#EXTM3U")
+                    appendLine("#EXTINF:12,Astral Wave - Starlight Reverie")
+                    appendLine("01_starlight_reverie.wav")
+                    appendLine("#EXTINF:14,The Velvet Collective - Moonlight Rain")
+                    appendLine("01_moonlight_rain.wav")
+                    appendLine("#EXTINF:12,Astral Wave - Neon Horizon")
+                    appendLine("02_neon_horizon.wav")
+                }
+                sampleM3u.writeText(m3uContent)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error writing sample .m3u playlist", e)
+        }
+
         tracks
     }
 

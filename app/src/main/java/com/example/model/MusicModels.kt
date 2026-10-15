@@ -72,7 +72,9 @@ data class Playlist(
     val name: String,
     val trackIds: List<String> = emptyList(),
     val createdDate: Long = System.currentTimeMillis(),
-    val isSystemFavorites: Boolean = false
+    val isSystemFavorites: Boolean = false,
+    val isM3u: Boolean = false,
+    val filePath: String? = null
 )
 
 enum class SortOption(val displayName: String) {

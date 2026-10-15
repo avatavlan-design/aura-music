@@ -1,6 +1,7 @@
 package com.example.ui
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.MusicRepository
@@ -139,5 +140,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.rescanLibrary()
             _snackbarMessage.value = "Library refreshed"
         }
+    }
+
+    fun importM3uPlaylist(uri: Uri) {
+        viewModelScope.launch {
+            val pl = repository.importM3uPlaylist(uri)
+            if (pl != null) {
+                _snackbarMessage.value = "Imported '${pl.name}' (${pl.trackIds.size} tracks)"
+            } else {
+                _snackbarMessage.value = "Could not import M3U playlist"
+            }
+        }
+    }
+
+    fun deletePlaylist(playlistId: String) {
+        repository.deletePlaylist(playlistId)
+        _snackbarMessage.value = "Playlist removed"
     }
 }

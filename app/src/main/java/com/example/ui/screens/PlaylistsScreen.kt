@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Shuffle
@@ -45,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Playlist
@@ -59,6 +64,8 @@ fun PlaylistsScreen(
     currentTrackId: String?,
     isPlaying: Boolean,
     onCreatePlaylist: (String) -> Unit,
+    onImportM3u: (Uri) -> Unit = {},
+    onDeletePlaylist: (String) -> Unit = {},
     onTrackClick: (Track, List<Track>, Int) -> Unit,
     onQueueTrack: (Track) -> Unit,
     onToggleFavorite: (String) -> Unit,
@@ -68,6 +75,15 @@ fun PlaylistsScreen(
     var selectedPlaylist by remember { mutableStateOf<Playlist?>(null) }
     var showCreateDialog by remember { mutableStateOf(false) }
     var newPlaylistTitle by remember { mutableStateOf("") }
+    var playlistToDelete by remember { mutableStateOf<Playlist?>(null) }
+
+    val m3uPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            onImportM3u(uri)
+        }
+    }
 
     if (showCreateDialog) {
         AlertDialog(
@@ -80,7 +96,9 @@ fun PlaylistsScreen(
                     placeholder = { Text("Playlist Name") },
                     singleLine = true,
                     shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().testTag("playlist_name_input")
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("playlist_name_input")
                 )
             },
             confirmButton = {
@@ -99,6 +117,36 @@ fun PlaylistsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showCreateDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (playlistToDelete != null) {
+        val pl = playlistToDelete!!
+        AlertDialog(
+            onDismissRequest = { playlistToDelete = null },
+            title = { Text("Delete Playlist") },
+            text = {
+                Text("Are you sure you want to delete '${pl.name}'?")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeletePlaylist(pl.id)
+                        if (selectedPlaylist?.id == pl.id) {
+                            selectedPlaylist = null
+                        }
+                        playlistToDelete = null
+                    },
+                    modifier = Modifier.testTag("confirm_delete_playlist")
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { playlistToDelete = null }) {
                     Text("Cancel")
                 }
             }
@@ -125,8 +173,24 @@ fun PlaylistsScreen(
                 Text(
                     text = playlist.name,
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+
+                if (!playlist.isSystemFavorites) {
+                    IconButton(
+                        onClick = { playlistToDelete = playlist },
+                        modifier = Modifier.testTag("delete_playlist_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Delete Playlist",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
             }
 
             LazyColumn(
@@ -147,15 +211,35 @@ fun PlaylistsScreen(
                             shapeRadius = 16.dp
                         )
                         Spacer(modifier = Modifier.width(16.dp))
-                        Column {
-                            Text(
-                                text = playlist.name,
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
-                            )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = playlist.name,
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (playlist.isM3u) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                                        shape = RoundedCornerShape(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "M3U",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontSize = 10.sp,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "${playlistTracks.size} songs",
+                                text = if (playlist.isM3u) "${playlistTracks.size} songs • .m3u Playlist" else "${playlistTracks.size} songs",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.outline
                             )
@@ -185,12 +269,27 @@ fun PlaylistsScreen(
                                 Icon(Icons.Default.Shuffle, contentDescription = "Shuffle")
                             }
                         }
+                    } else {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 12.dp)
+                        ) {
+                            Text(
+                                text = if (playlist.isM3u) "No local audio files matched the entries in this .m3u playlist." else "Playlist is empty. Add songs from the Songs tab!",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
-                itemsIndexed(playlistTracks, key = { _, track -> track.id }) { index, track ->
+                itemsIndexed(playlistTracks, key = { _, track -> "${playlist.id}_${track.id}" }) { index, track ->
                     SwipeToQueueTrackItem(
                         track = track,
                         isPlaying = isPlaying,
@@ -221,15 +320,42 @@ fun PlaylistsScreen(
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
-                        Button(
-                            onClick = { showCreateDialog = true },
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("create_playlist_button")
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("New Playlist", fontSize = 13.sp)
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            // Import .m3u button
+                            FilledTonalButton(
+                                onClick = {
+                                    m3uPickerLauncher.launch(
+                                        arrayOf(
+                                            "audio/x-mpegurl",
+                                            "audio/mpegurl",
+                                            "application/x-mpegurl",
+                                            "application/vnd.apple.mpegurl",
+                                            "text/plain",
+                                            "*/*"
+                                        )
+                                    )
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("import_m3u_button")
+                            ) {
+                                Icon(Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Import .m3u", fontSize = 12.sp)
+                            }
+
+                            // Create custom playlist button
+                            Button(
+                                onClick = { showCreateDialog = true },
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("create_playlist_button")
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("New Playlist", fontSize = 12.sp)
+                            }
                         }
                     }
                 }
@@ -255,14 +381,35 @@ fun PlaylistsScreen(
                             )
                             Spacer(modifier = Modifier.width(16.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = pl.name,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = pl.name,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (pl.isM3u) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                                            shape = RoundedCornerShape(4.dp)
+                                        ) {
+                                            Text(
+                                                text = "M3U",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 10.sp,
+                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                }
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = "${pl.trackIds.size} songs",
+                                    text = if (pl.isM3u) "${pl.trackIds.size} songs • .m3u Playlist" else "${pl.trackIds.size} songs",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.outline
                                 )
