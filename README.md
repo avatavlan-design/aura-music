@@ -72,44 +72,6 @@ The compiled APK will be located at:
 
 ---
 
-## 🤖 GitHub Actions CI/CD & Automated Releases
-
-This repository includes a GitHub Actions workflow (`.github/workflows/android-build-release.yml`) that automatically builds and tests the app.
-
-### Automated Builds on Every Push / PR
-Every push to `main` or pull request will automatically:
-1. Check out the codebase and set up JDK 17.
-2. Run unit tests (`testDebugUnitTest`).
-3. Compile the debug and release APKs.
-4. Upload the built APKs as downloadable artifacts in the GitHub Actions run summary.
-
-### Creating an Automated GitHub Release
-To trigger an automated GitHub Release with compiled APKs attached:
-```bash
-# Tag a new version
-git tag v1.0.0
-
-# Push the tag to GitHub
-git push origin v1.0.0
-```
-The workflow will automatically create a new GitHub Release with release notes and attach:
-- `AuraMusic-v1.0.0-release.apk`
-- `AuraMusic-v1.0.0-debug.apk`
-
-### Configuring Production Signing (Optional)
-If you wish to sign release APKs with your custom production keystore, add the following secrets in **GitHub Repository Settings → Secrets and variables → Actions**:
-
-| Secret Name | Description |
-|---|---|
-| `KEYSTORE_BASE64` | Base64-encoded `.jks` keystore file (`base64 -w 0 upload-key.jks`) |
-| `STORE_PASSWORD` | Keystore password |
-| `KEY_ALIAS` | Key alias name (default: `upload`) |
-| `KEY_PASSWORD` | Key password |
-
-*Note: If these secrets are not provided, the CI workflow automatically generates a signing key for the build so release APKs can always be compiled and installed!*
-
----
-
 ## 📄 License
 
 ```text
