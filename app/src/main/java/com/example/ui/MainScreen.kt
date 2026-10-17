@@ -57,7 +57,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     val selectedTab by viewModel.selectedTab.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val isSearchActive by viewModel.isSearchActive.collectAsState()
-    val isDarkMode by viewModel.isDarkMode.collectAsState()
+    val currentTheme by viewModel.currentTheme.collectAsState()
     val isNowPlayingExpanded by viewModel.isNowPlayingExpanded.collectAsState()
     val snackbarMessage by viewModel.snackbarMessage.collectAsState()
 
@@ -113,8 +113,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                 onSearchQueryChange = { viewModel.updateSearchQuery(it) },
                 isSearchActive = isSearchActive,
                 onToggleSearch = { viewModel.toggleSearch() },
-                isDarkMode = isDarkMode,
-                onToggleTheme = { viewModel.toggleTheme() },
+                currentTheme = currentTheme,
+                onCycleTheme = { viewModel.cycleTheme() },
                 isScanning = isScanning,
                 onRescan = { viewModel.rescanLibrary() }
             )

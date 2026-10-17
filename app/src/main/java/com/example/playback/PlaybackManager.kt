@@ -7,6 +7,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
@@ -22,12 +23,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 class PlaybackManager(
     private val context: Context,
     private val scope: CoroutineScope
 ) {
     private val TAG = "PlaybackManager"
+    private val sessionPrefs = context.getSharedPreferences(SESSION_PREFS_NAME, Context.MODE_PRIVATE)
 
     // Tuned LoadControl for aggressive seamless preloading
     private val loadControl = DefaultLoadControl.Builder()
@@ -54,8 +58,10 @@ class PlaybackManager(
 
     private var activeQueue: List<Track> = emptyList()
     private var progressJob: Job? = null
+    private var lastPersistedTickMs: Long = 0L
 
     init {
+        restorePlaybackSession()
         ensurePlayerActive()
     }
 
@@ -68,6 +74,19 @@ class PlaybackManager(
         val newPlayer = createExoPlayer()
         _exoPlayer = newPlayer
         attachListeners(newPlayer)
+
+        // If we already have an active or restored queue, prime the player with the queue items
+        if (activeQueue.isNotEmpty() && newPlayer.mediaItemCount == 0) {
+            try {
+                val mediaItems = activeQueue.map { it.toMediaItem() }
+                val startIdx = _playbackState.value.currentIndex.coerceIn(0, activeQueue.size - 1)
+                val startPos = _playbackState.value.currentPositionMs.coerceAtLeast(0L)
+                newPlayer.setMediaItems(mediaItems, startIdx, startPos)
+                newPlayer.prepare()
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to pre-populate restored queue into ExoPlayer", e)
+            }
+        }
         return newPlayer
     }
 
@@ -100,34 +119,75 @@ class PlaybackManager(
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                updateState { it.copy(isPlaying = isPlaying) }
+                val currentPos = player.currentPosition.coerceAtLeast(0L)
+                val resolvedPos = if (currentPos > 0L) currentPos else _playbackState.value.currentPositionMs
+                val resolvedDur = if (player.duration > 0L) player.duration else _playbackState.value.durationMs
+                updateState {
+                    it.copy(
+                        isPlaying = isPlaying,
+                        currentPositionMs = resolvedPos,
+                        durationMs = resolvedDur
+                    )
+                }
                 if (isPlaying) {
                     startProgressTicker()
                 } else {
                     stopProgressTicker()
+                    savePlaybackSession()
                 }
                 syncWidgetsAndNotification()
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (!playWhenReady) {
+                    val pos = player.currentPosition.coerceAtLeast(_playbackState.value.currentPositionMs)
+                    updateState { it.copy(currentPositionMs = pos) }
+                    savePlaybackSession()
+                }
+            }
+
+            override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
+                if (playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE) {
+                    // External audio focus loss (e.g. Instagram video started playing):
+                    // Capture and persist the exact playback position immediately.
+                    val pos = player.currentPosition.coerceAtLeast(_playbackState.value.currentPositionMs)
+                    updateState { it.copy(currentPositionMs = pos, isPlaying = player.isPlaying) }
+                    savePlaybackSession()
+                    syncWidgetsAndNotification()
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
                     Player.STATE_READY -> {
+                        val resolvedPos = player.currentPosition.coerceAtLeast(_playbackState.value.currentPositionMs)
+                        val resolvedDur = if (player.duration > 0L) player.duration else _playbackState.value.durationMs
                         updateState {
                             it.copy(
-                                durationMs = player.duration.coerceAtLeast(0L),
-                                currentPositionMs = player.currentPosition.coerceAtLeast(0L),
+                                durationMs = resolvedDur,
+                                currentPositionMs = resolvedPos,
                                 isPreloaded = player.hasNextMediaItem()
                             )
                         }
+                        savePlaybackSession()
                     }
                     Player.STATE_ENDED -> {
                         if (player.repeatMode == Player.REPEAT_MODE_OFF && !player.hasNextMediaItem()) {
-                            updateState { it.copy(isPlaying = false) }
+                            updateState { it.copy(isPlaying = false, currentPositionMs = 0L) }
                             stopProgressTicker()
+                            savePlaybackSession()
                         }
                     }
                     else -> Unit
                 }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                Log.w(TAG, "ExoPlayer error encountered; preserving session for clean recovery", error)
+                val pos = player.currentPosition.coerceAtLeast(_playbackState.value.currentPositionMs)
+                updateState { it.copy(isPlaying = false, currentPositionMs = pos) }
+                savePlaybackSession()
+                syncWidgetsAndNotification()
             }
         })
     }
@@ -144,12 +204,19 @@ class PlaybackManager(
             while (isActive) {
                 val player = _exoPlayer
                 if (player != null && player.isPlaying) {
+                    val pos = player.currentPosition.coerceAtLeast(0L)
+                    val dur = if (player.duration > 0L) player.duration else _playbackState.value.durationMs
                     updateState {
                         it.copy(
-                            currentPositionMs = player.currentPosition.coerceAtLeast(0L),
-                            durationMs = player.duration.coerceAtLeast(0L),
+                            currentPositionMs = pos,
+                            durationMs = dur,
                             isPreloaded = player.hasNextMediaItem()
                         )
+                    }
+                    val now = System.currentTimeMillis()
+                    if (now - lastPersistedTickMs >= 2000L) {
+                        lastPersistedTickMs = now
+                        savePlaybackSession()
                     }
                 }
                 delay(250)
@@ -169,19 +236,24 @@ class PlaybackManager(
     fun playQueue(tracks: List<Track>, startIndex: Int = 0) {
         if (tracks.isEmpty()) return
 
+        val safeIndex = startIndex.coerceIn(0, tracks.size - 1)
         val player = ensurePlayerActive()
         activeQueue = tracks
         val mediaItems = tracks.map { it.toMediaItem() }
 
-        player.setMediaItems(mediaItems, startIndex, 0L)
+        player.setMediaItems(mediaItems, safeIndex, 0L)
         player.prepare()
+        if (player.playWhenReady) {
+            player.playWhenReady = false
+        }
+        player.playWhenReady = true
         player.play()
 
-        val currentTrack = tracks.getOrNull(startIndex)
+        val currentTrack = tracks.getOrNull(safeIndex)
         updateState {
             it.copy(
                 queue = tracks,
-                currentIndex = startIndex,
+                currentIndex = safeIndex,
                 currentTrack = currentTrack,
                 durationMs = currentTrack?.durationMs ?: 0L,
                 currentPositionMs = 0L,
@@ -189,6 +261,7 @@ class PlaybackManager(
                 isPreloaded = tracks.size > 1
             )
         }
+        savePlaybackSession()
         syncWidgetsAndNotification()
     }
 
@@ -204,7 +277,8 @@ class PlaybackManager(
             return
         }
 
-        val currentIndex = player.currentMediaItemIndex
+        val currentIndex = player.currentMediaItemIndex.takeIf { it in activeQueue.indices }
+            ?: _playbackState.value.currentIndex.coerceIn(0, activeQueue.size - 1)
         val insertIndex = if (playNext && currentIndex in activeQueue.indices) {
             currentIndex + 1
         } else {
@@ -215,7 +289,13 @@ class PlaybackManager(
         newQueue.add(insertIndex, track)
         activeQueue = newQueue
 
-        player.addMediaItem(insertIndex, track.toMediaItem())
+        if (player.mediaItemCount > 0) {
+            player.addMediaItem(insertIndex.coerceAtMost(player.mediaItemCount), track.toMediaItem())
+        } else {
+            val mediaItems = activeQueue.map { it.toMediaItem() }
+            player.setMediaItems(mediaItems, currentIndex, _playbackState.value.currentPositionMs)
+            player.prepare()
+        }
 
         updateState {
             it.copy(
@@ -223,50 +303,131 @@ class PlaybackManager(
                 isPreloaded = player.hasNextMediaItem()
             )
         }
+        savePlaybackSession()
     }
 
     fun playPause() {
         val player = ensurePlayerActive()
         if (player.isPlaying) {
+            val pos = player.currentPosition.coerceAtLeast(_playbackState.value.currentPositionMs)
             player.pause()
+            updateState { it.copy(isPlaying = false, currentPositionMs = pos) }
+            savePlaybackSession()
+            syncWidgetsAndNotification()
         } else {
-            if (player.playbackState == Player.STATE_IDLE && activeQueue.isNotEmpty()) {
-                val mediaItems = activeQueue.map { it.toMediaItem() }
-                val startIdx = _playbackState.value.currentIndex.coerceIn(0, activeQueue.size - 1)
-                player.setMediaItems(mediaItems, startIdx, _playbackState.value.currentPositionMs)
-                player.prepare()
-            }
-            player.play()
+            resumePlayback()
         }
+    }
+
+    /**
+     * Resumes playback reliably even after external audio focus loss (e.g. Instagram video),
+     * decoder release, or background service/process recreation.
+     */
+    fun resumePlayback() {
+        val player = ensurePlayerActive()
+        if (activeQueue.isEmpty()) {
+            restorePlaybackSession()
+        }
+        if (activeQueue.isEmpty()) return
+
+        val targetIndex = _playbackState.value.currentIndex.coerceIn(0, activeQueue.size - 1)
+        val playerPos = if (player.currentMediaItemIndex == targetIndex) player.currentPosition else 0L
+        val targetPosition = maxOf(playerPos, _playbackState.value.currentPositionMs, 0L)
+
+        if (player.mediaItemCount == 0 || player.playbackState == Player.STATE_IDLE || player.playerError != null) {
+            val mediaItems = activeQueue.map { it.toMediaItem() }
+            player.setMediaItems(mediaItems, targetIndex, targetPosition)
+            player.prepare()
+        } else if (player.playbackState == Player.STATE_ENDED) {
+            player.seekTo(targetIndex, 0L)
+        } else if (player.currentMediaItemIndex != targetIndex) {
+            player.seekTo(targetIndex, targetPosition)
+        }
+
+        // If playWhenReady stayed true during transient audio focus suppression,
+        // toggling false -> true forces ExoPlayer's AudioFocusManager to re-request audio focus.
+        if (player.playWhenReady) {
+            player.playWhenReady = false
+        }
+        player.playWhenReady = true
+        player.play()
+
+        val currentTrack = activeQueue.getOrNull(targetIndex)
+        updateState {
+            it.copy(
+                queue = activeQueue,
+                currentIndex = targetIndex,
+                currentTrack = currentTrack,
+                durationMs = if (player.duration > 0L) player.duration else (currentTrack?.durationMs ?: it.durationMs),
+                currentPositionMs = if (player.playbackState == Player.STATE_ENDED) 0L else targetPosition,
+                isPlaying = true,
+                isPreloaded = activeQueue.size > 1
+            )
+        }
+        savePlaybackSession()
+        syncWidgetsAndNotification()
     }
 
     fun skipToNext() {
         val player = ensurePlayerActive()
-        if (player.hasNextMediaItem()) {
+        if (activeQueue.isEmpty()) {
+            restorePlaybackSession()
+        }
+        if (activeQueue.isEmpty()) return
+
+        if (player.mediaItemCount == 0 || player.playbackState == Player.STATE_IDLE || player.playerError != null) {
+            val nextIdx = ((_playbackState.value.currentIndex + 1) % activeQueue.size).coerceIn(0, activeQueue.size - 1)
+            val mediaItems = activeQueue.map { it.toMediaItem() }
+            player.setMediaItems(mediaItems, nextIdx, 0L)
+            player.prepare()
+        } else if (player.hasNextMediaItem()) {
             player.seekToNextMediaItem()
-            player.play()
         } else if (player.repeatMode == Player.REPEAT_MODE_ALL && activeQueue.isNotEmpty()) {
             player.seekTo(0, 0L)
-            player.play()
         }
+
+        if (player.playWhenReady) {
+            player.playWhenReady = false
+        }
+        player.playWhenReady = true
+        player.play()
+        updateCurrentTrackFromPlayer()
     }
 
     fun skipToPrevious() {
         val player = ensurePlayerActive()
-        if (player.currentPosition > 3000) {
+        if (activeQueue.isEmpty()) {
+            restorePlaybackSession()
+        }
+        if (activeQueue.isEmpty()) return
+
+        if (player.mediaItemCount == 0 || player.playbackState == Player.STATE_IDLE || player.playerError != null) {
+            val prevIdx = (_playbackState.value.currentIndex - 1).coerceAtLeast(0)
+            val mediaItems = activeQueue.map { it.toMediaItem() }
+            player.setMediaItems(mediaItems, prevIdx, 0L)
+            player.prepare()
+        } else if (player.currentPosition > 3000) {
             player.seekTo(0L)
         } else if (player.hasPreviousMediaItem()) {
             player.seekToPreviousMediaItem()
-            player.play()
         } else {
             player.seekTo(0L)
         }
+
+        if (player.playWhenReady) {
+            player.playWhenReady = false
+        }
+        player.playWhenReady = true
+        player.play()
+        updateCurrentTrackFromPlayer()
     }
 
     fun seekTo(positionMs: Long) {
+        val safePos = positionMs.coerceAtLeast(0L)
         val player = ensurePlayerActive()
-        player.seekTo(positionMs)
-        updateState { it.copy(currentPositionMs = positionMs) }
+        player.seekTo(safePos)
+        updateState { it.copy(currentPositionMs = safePos) }
+        savePlaybackSession()
     }
 
     fun toggleShuffle() {
@@ -274,6 +435,7 @@ class PlaybackManager(
         val newShuffle = !_playbackState.value.isShuffleEnabled
         player.shuffleModeEnabled = newShuffle
         updateState { it.copy(isShuffleEnabled = newShuffle) }
+        savePlaybackSession()
     }
 
     fun cycleRepeatMode() {
@@ -291,13 +453,25 @@ class PlaybackManager(
         }
 
         updateState { it.copy(repeatMode = nextMode) }
+        savePlaybackSession()
     }
 
     fun jumpToQueueIndex(index: Int) {
         val player = ensurePlayerActive()
         if (index in activeQueue.indices) {
-            player.seekTo(index, 0L)
+            if (player.mediaItemCount == 0 || player.playbackState == Player.STATE_IDLE || player.playerError != null) {
+                val mediaItems = activeQueue.map { it.toMediaItem() }
+                player.setMediaItems(mediaItems, index, 0L)
+                player.prepare()
+            } else {
+                player.seekTo(index, 0L)
+            }
+            if (player.playWhenReady) {
+                player.playWhenReady = false
+            }
+            player.playWhenReady = true
             player.play()
+            updateCurrentTrackFromPlayer()
         }
     }
 
@@ -309,10 +483,12 @@ class PlaybackManager(
         newQueue.removeAt(index)
         activeQueue = newQueue
 
-        player.removeMediaItem(index)
+        if (index < player.mediaItemCount) {
+            player.removeMediaItem(index)
+        }
 
-        val updatedIndex = player.currentMediaItemIndex
-        val updatedTrack = activeQueue.getOrNull(updatedIndex)
+        val updatedIndex = if (newQueue.isEmpty()) -1 else player.currentMediaItemIndex.coerceIn(0, newQueue.size - 1)
+        val updatedTrack = newQueue.getOrNull(updatedIndex)
 
         updateState {
             it.copy(
@@ -322,22 +498,148 @@ class PlaybackManager(
                 isPreloaded = player.hasNextMediaItem()
             )
         }
+        savePlaybackSession()
     }
 
     private fun updateCurrentTrackFromPlayer() {
         val player = _exoPlayer ?: return
-        val index = player.currentMediaItemIndex
+        if (activeQueue.isEmpty()) return
+        val index = player.currentMediaItemIndex.coerceIn(0, activeQueue.size - 1)
         val currentTrack = activeQueue.getOrNull(index)
+        val dur = if (player.duration > 0L) player.duration else (currentTrack?.durationMs ?: 0L)
+        val pos = player.currentPosition.coerceAtLeast(0L)
 
         updateState {
             it.copy(
                 currentIndex = index,
                 currentTrack = currentTrack,
-                durationMs = player.duration.coerceAtLeast(0L),
+                durationMs = dur,
+                currentPositionMs = pos,
                 isPreloaded = player.hasNextMediaItem()
             )
         }
+        savePlaybackSession()
         syncWidgetsAndNotification()
+    }
+
+    fun savePlaybackSession() {
+        try {
+            val state = _playbackState.value
+            val queueToSave = activeQueue.ifEmpty { state.queue }
+            if (queueToSave.isEmpty() || state.currentTrack == null) {
+                return
+            }
+
+            val jsonArray = JSONArray()
+            for (track in queueToSave) {
+                val obj = JSONObject().apply {
+                    put("id", track.id)
+                    put("title", track.title)
+                    put("artist", track.artist)
+                    put("album", track.album)
+                    put("albumArtist", track.albumArtist)
+                    put("genre", track.genre)
+                    put("trackNumber", track.trackNumber)
+                    put("discNumber", track.discNumber)
+                    put("durationMs", track.durationMs)
+                    put("uri", track.uri)
+                    put("filePath", track.filePath ?: "")
+                    put("mimeType", track.mimeType)
+                    put("bitrateKbps", track.bitrateKbps)
+                    put("sampleRateHz", track.sampleRateHz)
+                    put("dateAdded", track.dateAdded)
+                    put("folderPath", track.folderPath)
+                    put("hasEmbeddedArtwork", track.hasEmbeddedArtwork)
+                    if (track.albumId != null) put("albumId", track.albumId)
+                    put("isFavorite", track.isFavorite)
+                }
+                jsonArray.put(obj)
+            }
+
+            val playerPos = _exoPlayer?.currentPosition ?: 0L
+            val posToSave = if (playerPos > 0L) playerPos else state.currentPositionMs.coerceAtLeast(0L)
+
+            sessionPrefs.edit()
+                .putString(KEY_QUEUE_JSON, jsonArray.toString())
+                .putInt(KEY_CURRENT_INDEX, state.currentIndex.coerceIn(0, queueToSave.size - 1))
+                .putLong(KEY_CURRENT_POSITION_MS, posToSave)
+                .putBoolean(KEY_SHUFFLE_ENABLED, state.isShuffleEnabled)
+                .putString(KEY_REPEAT_MODE, state.repeatMode.name)
+                .apply()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to persist playback session", e)
+        }
+    }
+
+    fun restorePlaybackSession() {
+        try {
+            val queueJsonStr = sessionPrefs.getString(KEY_QUEUE_JSON, null) ?: return
+            val jsonArray = JSONArray(queueJsonStr)
+            if (jsonArray.length() == 0) return
+
+            val restoredTracks = mutableListOf<Track>()
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.optJSONObject(i) ?: continue
+                val filePathRaw = obj.optString("filePath", "")
+                val hasAlbumId = obj.has("albumId") && !obj.isNull("albumId")
+                restoredTracks.add(
+                    Track(
+                        id = obj.optString("id", ""),
+                        title = obj.optString("title", "Unknown Title"),
+                        artist = obj.optString("artist", "Unknown Artist"),
+                        album = obj.optString("album", "Unknown Album"),
+                        albumArtist = obj.optString("albumArtist", "Unknown Artist"),
+                        genre = obj.optString("genre", "General"),
+                        trackNumber = obj.optInt("trackNumber", 1),
+                        discNumber = obj.optInt("discNumber", 1),
+                        durationMs = obj.optLong("durationMs", 0L),
+                        uri = obj.optString("uri", ""),
+                        filePath = filePathRaw.ifEmpty { null },
+                        mimeType = obj.optString("mimeType", "audio/mpeg"),
+                        bitrateKbps = obj.optInt("bitrateKbps", 320),
+                        sampleRateHz = obj.optInt("sampleRateHz", 44100),
+                        dateAdded = obj.optLong("dateAdded", System.currentTimeMillis()),
+                        folderPath = obj.optString("folderPath", "Default"),
+                        hasEmbeddedArtwork = obj.optBoolean("hasEmbeddedArtwork", false),
+                        albumId = if (hasAlbumId) obj.optLong("albumId") else null,
+                        isFavorite = obj.optBoolean("isFavorite", false)
+                    )
+                )
+            }
+
+            if (restoredTracks.isEmpty()) return
+
+            val savedIndex = sessionPrefs.getInt(KEY_CURRENT_INDEX, 0).coerceIn(0, restoredTracks.size - 1)
+            val savedPositionMs = sessionPrefs.getLong(KEY_CURRENT_POSITION_MS, 0L).coerceAtLeast(0L)
+            val savedShuffle = sessionPrefs.getBoolean(KEY_SHUFFLE_ENABLED, false)
+            val savedRepeatStr = sessionPrefs.getString(KEY_REPEAT_MODE, RepeatMode.ALL.name) ?: RepeatMode.ALL.name
+            val savedRepeat = try {
+                RepeatMode.valueOf(savedRepeatStr)
+            } catch (_: Exception) {
+                RepeatMode.ALL
+            }
+
+            activeQueue = restoredTracks
+            val currentTrack = restoredTracks[savedIndex]
+
+            updateState {
+                it.copy(
+                    queue = restoredTracks,
+                    currentIndex = savedIndex,
+                    currentTrack = currentTrack,
+                    durationMs = currentTrack.durationMs,
+                    currentPositionMs = savedPositionMs.coerceAtMost(
+                        if (currentTrack.durationMs > 0L) currentTrack.durationMs else Long.MAX_VALUE
+                    ),
+                    isPlaying = false,
+                    isShuffleEnabled = savedShuffle,
+                    repeatMode = savedRepeat,
+                    isPreloaded = restoredTracks.size > 1
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restore playback session", e)
+        }
     }
 
     private fun syncWidgetsAndNotification() {
@@ -353,6 +655,9 @@ class PlaybackManager(
                 } else {
                     context.startService(serviceIntent)
                 }
+            } else if (state.currentTrack != null) {
+                // Best-effort service update when paused while app is in foreground
+                context.startService(serviceIntent)
             }
         } catch (_: Exception) {}
     }
@@ -373,13 +678,22 @@ class PlaybackManager(
 
     fun release() {
         if (isReleased) return
+        savePlaybackSession()
         isReleased = true
         stopProgressTicker()
-        MediaNotificationManager.cancelNotification(context)
         try {
             _exoPlayer?.release()
         } catch (_: Exception) {}
         _exoPlayer = null
+    }
+
+    companion object {
+        const val SESSION_PREFS_NAME = "aura_playback_session_prefs"
+        private const val KEY_QUEUE_JSON = "queue_json"
+        private const val KEY_CURRENT_INDEX = "current_index"
+        private const val KEY_CURRENT_POSITION_MS = "current_position_ms"
+        private const val KEY_SHUFFLE_ENABLED = "is_shuffle_enabled"
+        private const val KEY_REPEAT_MODE = "repeat_mode"
     }
 }
 

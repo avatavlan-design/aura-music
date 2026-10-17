@@ -26,7 +26,7 @@ import kotlin.math.absoluteValue
 
 object MediaNotificationManager {
     const val CHANNEL_ID = "aura_music_playback_channel"
-    const val NOTIFICATION_ID = 1001
+    const val NOTIFICATION_ID = 2002
 
     fun createNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -126,6 +126,7 @@ object MediaNotificationManager {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setShowWhen(false)
+            .setAutoCancel(false)
             .setOngoing(isPlaying)
             .addAction(R.drawable.ic_widget_prev, "Previous", prevPendingIntent)
             .addAction(playPauseIcon, playPauseTitle, playPausePendingIntent)
@@ -157,7 +158,7 @@ object MediaNotificationManager {
         }
     }
 
-    private fun createProceduralBitmap(track: Track): Bitmap {
+    fun createProceduralBitmap(track: Track): Bitmap {
         val size = 180
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)

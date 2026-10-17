@@ -15,15 +15,25 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+import android.content.Context
+import com.example.ui.theme.AppTheme
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val themePrefs = application.getSharedPreferences("aura_theme_prefs", Context.MODE_PRIVATE)
+
     val repository = MusicRepository(application, viewModelScope)
     val playbackManager: com.example.playback.PlaybackManager
         get() = com.example.playback.PlaybackManagerProvider.get(getApplication())
 
     val playbackState: StateFlow<PlaybackState> = com.example.playback.PlaybackManagerProvider.playbackState
+
+    init {
+        com.example.playback.PlaybackManagerProvider.get(application)
+    }
 
     private val _selectedTab = MutableStateFlow(LibraryTab.TRACKS)
     val selectedTab: StateFlow<LibraryTab> = _selectedTab.asStateFlow()
@@ -34,8 +44,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isSearchActive = MutableStateFlow(false)
     val isSearchActive: StateFlow<Boolean> = _isSearchActive.asStateFlow()
 
-    private val _isDarkMode = MutableStateFlow(true) // Default to sleek obsidian dark mode
-    val isDarkMode: StateFlow<Boolean> = _isDarkMode.asStateFlow()
+    private val _currentTheme = MutableStateFlow(loadSavedTheme())
+    val currentTheme: StateFlow<AppTheme> = _currentTheme.asStateFlow()
+
+    val isDarkMode: StateFlow<Boolean> = _currentTheme.map { it.isDark }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
     private val _isNowPlayingExpanded = MutableStateFlow(false)
     val isNowPlayingExpanded: StateFlow<Boolean> = _isNowPlayingExpanded.asStateFlow()
@@ -81,8 +94,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _searchQuery.value = query
     }
 
-    fun toggleTheme() {
-        _isDarkMode.value = !_isDarkMode.value
+    private fun loadSavedTheme(): AppTheme {
+        val savedName = themePrefs.getString(KEY_SAVED_THEME, null)
+        return AppTheme.fromId(savedName)
+    }
+
+    fun cycleTheme() {
+        val allThemes = AppTheme.values()
+        val currentIndex = allThemes.indexOf(_currentTheme.value)
+        val nextIndex = if (currentIndex in allThemes.indices) (currentIndex + 1) % allThemes.size else 0
+        val nextTheme = allThemes[nextIndex]
+        _currentTheme.value = nextTheme
+        themePrefs.edit().putString(KEY_SAVED_THEME, nextTheme.id).apply()
+        _snackbarMessage.value = "Theme: ${nextTheme.displayName}"
+    }
+
+    fun toggleTheme() = cycleTheme()
+
+    companion object {
+        private const val KEY_SAVED_THEME = "selected_app_theme"
     }
 
     fun setNowPlayingExpanded(expanded: Boolean) {

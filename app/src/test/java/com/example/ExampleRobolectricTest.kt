@@ -105,4 +105,70 @@ class ExampleRobolectricTest {
     org.junit.Assert.assertTrue(resolvedIds.contains("track_1"))
     org.junit.Assert.assertTrue(resolvedIds.contains("track_2"))
   }
+
+  @Test
+  fun `playbackManager persists and restores active track queue and position across resets`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.playback.PlaybackManagerProvider.reset()
+
+    val tracks = listOf(
+      com.example.model.Track(
+        id = "t_1",
+        title = "First Song",
+        artist = "Artist A",
+        album = "Album A",
+        durationMs = 180000L,
+        uri = "file:///music/first.mp3"
+      ),
+      com.example.model.Track(
+        id = "t_2",
+        title = "Second Song",
+        artist = "Artist B",
+        album = "Album B",
+        durationMs = 210000L,
+        uri = "file:///music/second.mp3"
+      )
+    )
+
+    val manager1 = com.example.playback.PlaybackManagerProvider.get(context)
+    manager1.playQueue(tracks, startIndex = 1)
+    manager1.seekTo(45000L)
+    manager1.playPause() // Simulate pause when another app (e.g. Instagram) takes focus
+
+    // Simulate background cleanup / recreation
+    com.example.playback.PlaybackManagerProvider.reset()
+
+    val manager2 = com.example.playback.PlaybackManagerProvider.get(context)
+    val restoredState = manager2.playbackState.value
+
+    org.junit.Assert.assertNotNull(restoredState.currentTrack)
+    assertEquals("t_2", restoredState.currentTrack?.id)
+    assertEquals("Second Song", restoredState.currentTrack?.title)
+    assertEquals(1, restoredState.currentIndex)
+    assertEquals(2, restoredState.queue.size)
+    assertEquals(45000L, restoredState.currentPositionMs)
+  }
+
+  @Test
+  fun `theme cycling updates current theme and remembers preference when re-created`() {
+    val application = ApplicationProvider.getApplicationContext<android.app.Application>()
+    val vm1 = com.example.ui.MainViewModel(application)
+
+    val initialTheme = vm1.currentTheme.value
+    assertEquals(com.example.ui.theme.AppTheme.OBSIDIAN_PURPLE, initialTheme)
+
+    // Cycle themes
+    vm1.cycleTheme()
+    val secondTheme = vm1.currentTheme.value
+    assertEquals(com.example.ui.theme.AppTheme.CLEAN_LIGHT, secondTheme)
+
+    vm1.cycleTheme()
+    val thirdTheme = vm1.currentTheme.value
+    assertEquals(com.example.ui.theme.AppTheme.EMERALD_BLACK, thirdTheme)
+    assertEquals("Green & Black", thirdTheme.displayName)
+
+    // Create a new ViewModel instance to simulate restarting the app
+    val vm2 = com.example.ui.MainViewModel(application)
+    assertEquals(com.example.ui.theme.AppTheme.EMERALD_BLACK, vm2.currentTheme.value)
+  }
 }

@@ -25,7 +25,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val mainViewModel: MainViewModel = viewModel()
-            val isDarkMode by mainViewModel.isDarkMode.collectAsState()
+            val currentTheme by mainViewModel.currentTheme.collectAsState()
 
             // Request runtime permissions gracefully for audio reading
             val permissionLauncher = rememberLauncherForActivityResult(
@@ -48,11 +48,23 @@ class MainActivity : ComponentActivity() {
                 } catch (_: Exception) {}
             }
 
-            AuraMusicTheme(darkTheme = isDarkMode) {
+            AuraMusicTheme(theme = currentTheme) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     MainScreen(viewModel = mainViewModel)
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        com.example.playback.PlaybackManagerProvider.get(this)
+    }
+
+    override fun onStop() {
+        try {
+            com.example.playback.PlaybackManagerProvider.get(this).savePlaybackSession()
+        } catch (_: Exception) {}
+        super.onStop()
     }
 }

@@ -6,46 +6,94 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Vinyl outer disc -->
-    <path
-        android:fillColor="#181824"
-        android:strokeColor="#2E2E3E"
-        android:strokeWidth="1.5"
-        android:pathData="M54,54m-28,0a28,28 0 1,1 56,0a28,28 0 1,1 -56,0" />
-
-    <!-- Vinyl concentric sound grooves -->
-    <path
-        android:strokeColor="#35354A"
-        android:strokeWidth="0.8"
-        android:pathData="M54,54m-23,0a23,23 0 1,1 46,0a23,23 0 1,1 -46,0" />
-    <path
-        android:strokeColor="#2E2E42"
-        android:strokeWidth="0.8"
-        android:pathData="M54,54m-18,0a18,18 0 1,1 36,0a18,18 0 1,1 -36,0" />
-
-    <!-- Center colorful gradient badge -->
-    <path android:pathData="M54,54m-12,0a12,12 0 1,1 24,0a12,12 0 1,1 -24,0">
+    <!-- Glowing center aura halo behind vinyl label -->
+    <path android:pathData="M54,54m-27,0a27,27 0 1,1 54,0a27,27 0 1,1 -54,0">
         <aapt:attr name="android:fillColor">
             <gradient
-                android:startX="42"
-                android:startY="42"
-                android:endX="66"
-                android:endY="66"
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="27"
+                android:type="radial">
+                <item android:color="#358B5CF6" android:offset="0.0" />
+                <item android:color="#2006B6D4" android:offset="0.75" />
+                <item android:color="#00000000" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Vinyl Center Record Label Badge -->
+    <path android:pathData="M54,54m-22,0a22,22 0 1,1 44,0a22,22 0 1,1 -44,0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="32"
+                android:startY="32"
+                android:endX="76"
+                android:endY="76"
                 android:type="linear">
-                <item android:color="#A855F7" android:offset="0.0" />
-                <item android:color="#6366F1" android:offset="0.5" />
+                <item android:color="#7C3AED" android:offset="0.0" />
+                <item android:color="#4F46E5" android:offset="0.45" />
                 <item android:color="#06B6D4" android:offset="1.0" />
             </gradient>
         </aapt:attr>
     </path>
 
-    <!-- Center spindle hole -->
+    <!-- Center Label Outer Accent Rim -->
+    <path
+        android:strokeColor="#60FFFFFF"
+        android:strokeWidth="1.2"
+        android:pathData="M54,54m-22,0a22,22 0 1,1 44,0a22,22 0 1,1 -44,0" />
+
+    <!-- Center Label Inner Ring -->
+    <path
+        android:strokeColor="#40FFFFFF"
+        android:strokeWidth="0.8"
+        android:pathData="M54,54m-18,0a18,18 0 1,1 36,0a18,18 0 1,1 -36,0" />
+
+    <!-- Subtle Spindle Center Hole -->
     <path
         android:fillColor="#0D0B18"
         android:pathData="M54,54m-3.5,0a3.5,3.5 0 1,1 7,0a3.5,3.5 0 1,1 -7,0" />
+    <path
+        android:strokeColor="#70FFFFFF"
+        android:strokeWidth="0.8"
+        android:pathData="M54,54m-3.5,0a3.5,3.5 0 1,1 7,0a3.5,3.5 0 1,1 -7,0" />
 
-    <!-- Modern music note / wave icon accents -->
+    <!-- Music Note Drop Shadow for 3D depth -->
+    <!-- Left note shadow -->
+    <path
+        android:fillColor="#50000000"
+        android:pathData="M40.5,65.5 c0,2.8 2.2,5 5,5 c2.8,0 5,-2.2 5,-5 c0,-2.8 -2.2,-5 -5,-5 c-2.8,0 -5,2.2 -5,5 z" />
+    <!-- Right note shadow -->
+    <path
+        android:fillColor="#50000000"
+        android:pathData="M57.5,60.5 c0,2.8 2.2,5 5,5 c2.8,0 5,-2.2 5,-5 c0,-2.8 -2.2,-5 -5,-5 c-2.8,0 -5,2.2 -5,5 z" />
+    <!-- Stems and beam shadow -->
+    <path
+        android:fillColor="#50000000"
+        android:pathData="M48,65.5 V42.5 L69,37.5 V60.5 h-3.5 V43.8 L51.5,47.8 V65.5 z" />
+
+    <!-- Pure Brilliant White Music Note (Beamed Eighth Notes) -->
+    <!-- Left Note Head -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M60,45.5v11.2c-0.8,-0.4 -1.8,-0.7 -2.8,-0.7c-2.3,0 -4.2,1.5 -4.2,3.5s1.9,3.5 4.2,3.5c2.3,0 4.1,-1.5 4.1,-3.5v-10.2h5.5v-3.8h-6.8z" />
+        android:pathData="M40,64 c0,2.8 2.2,5 5,5 c2.8,0 5,-2.2 5,-5 c0,-2.8 -2.2,-5 -5,-5 c-2.8,0 -5,2.2 -5,5 z" />
+    <!-- Right Note Head -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M57,59 c0,2.8 2.2,5 5,5 c2.8,0 5,-2.2 5,-5 c0,-2.8 -2.2,-5 -5,-5 c-2.8,0 -5,2.2 -5,5 z" />
+    <!-- Left Stem, Right Stem, and Connecting Crossbeam -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M47.5,64 V41 L68.5,36 V59 h-3.5 V42.3 L51,46.3 V64 z" />
+
+    <!-- Beaming Cyan Glow Accent Highlights on Music Note -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M47.5,41 L68.5,36 L68.5,38.8 L47.5,43.8 Z" />
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M43.5,63 c0,1.2 0.9,2.2 2,2.2 c1.1,0 2,-1 2,-2.2 c0,-1.2 -0.9,-2.2 -2,-2.2 c-1.1,0 -2,1 -2,2.2 z" />
+    <path
+        android:fillColor="#BAE6FD"
+        android:pathData="M60.5,58 c0,1.2 0.9,2.2 2,2.2 c1.1,0 2,-1 2,-2.2 c0,-1.2 -0.9,-2.2 -2,-2.2 c-1.1,0 -2,1 -2,2.2 z" />
 </vector>

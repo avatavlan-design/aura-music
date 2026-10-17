@@ -19,7 +19,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
@@ -37,12 +40,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.LibraryTab
+import com.example.ui.theme.AppTheme
 
 @Composable
 fun CategoryTopBar(
@@ -52,15 +57,15 @@ fun CategoryTopBar(
     onSearchQueryChange: (String) -> Unit,
     isSearchActive: Boolean,
     onToggleSearch: () -> Unit,
-    isDarkMode: Boolean,
-    onToggleTheme: () -> Unit,
+    currentTheme: AppTheme = AppTheme.OBSIDIAN_PURPLE,
+    onCycleTheme: () -> Unit = {},
     isScanning: Boolean,
     onRescan: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 3.dp,
+        tonalElevation = 2.dp,
         modifier = modifier.fillMaxWidth()
     ) {
         Column(
@@ -78,16 +83,24 @@ fun CategoryTopBar(
                 // App Logo and Title
                 Box(
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(38.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    MaterialTheme.colorScheme.primary,
+                                    MaterialTheme.colorScheme.secondary,
+                                    MaterialTheme.colorScheme.surface
+                                )
+                            )
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.GraphicEq,
+                        imageVector = Icons.Default.MusicNote,
                         contentDescription = "Aura Music",
                         tint = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
 
@@ -134,17 +147,17 @@ fun CategoryTopBar(
                     }
                 }
 
-                // Dark/Light Mode Switcher
+                // Theme Switcher Button (cycles through themes)
                 IconButton(
-                    onClick = onToggleTheme,
+                    onClick = onCycleTheme,
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
                         .testTag("theme_toggle_button")
                 ) {
                     Icon(
-                        imageVector = if (isDarkMode) Icons.Default.LightMode else Icons.Default.DarkMode,
-                        contentDescription = if (isDarkMode) "Switch to light mode" else "Switch to dark mode",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        imageVector = Icons.Default.Palette,
+                        contentDescription = "Theme: ${currentTheme.displayName}",
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
 
