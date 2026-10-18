@@ -46,9 +46,9 @@
             android:name=".widget.WidgetActionReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="com.example.auramusic.ACTION_PLAY_PAUSE" />
-                <action android:name="com.example.auramusic.ACTION_PREV" />
-                <action android:name="com.example.auramusic.ACTION_NEXT" />
+                <action android:name="org.anmon.auramusic.ACTION_PLAY_PAUSE" />
+                <action android:name="org.anmon.auramusic.ACTION_PREV" />
+                <action android:name="org.anmon.auramusic.ACTION_NEXT" />
             </intent-filter>
         </receiver>
 
