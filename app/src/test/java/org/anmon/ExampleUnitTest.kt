@@ -1,9 +1,9 @@
-package com.example
+package org.anmon
 
-import com.example.model.Album
-import com.example.model.RepeatMode
-import com.example.model.Track
-import com.example.playback.PlaybackState
+import org.anmon.model.Album
+import org.anmon.model.RepeatMode
+import org.anmon.model.Track
+import org.anmon.playback.PlaybackState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull

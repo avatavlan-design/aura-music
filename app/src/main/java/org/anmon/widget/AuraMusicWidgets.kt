@@ -1,9 +1,9 @@
-package com.example.widget
+package org.anmon.widget
 
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
 import android.content.Context
-import com.example.playback.PlaybackManagerProvider
+import org.anmon.playback.PlaybackManagerProvider
 
 class AuraMusicLargeWidget : AppWidgetProvider() {
     override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {

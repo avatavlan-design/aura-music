@@ -1,9 +1,9 @@
-package com.example.widget
+package org.anmon.widget
 
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import com.example.playback.PlaybackManagerProvider
+import org.anmon.playback.PlaybackManagerProvider
 
 class WidgetActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {

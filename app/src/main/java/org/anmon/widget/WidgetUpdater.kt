@@ -1,4 +1,4 @@
-package com.example.widget
+package org.anmon.widget
 
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
@@ -11,19 +11,19 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
 import android.widget.RemoteViews
-import com.example.MainActivity
-import com.example.R
-import com.example.data.ArtworkCache
-import com.example.model.Track
+import org.anmon.MainActivity
+import org.anmon.R
+import org.anmon.data.ArtworkCache
+import org.anmon.model.Track
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 
 object WidgetUpdater {
-    const val ACTION_PLAY_PAUSE = "com.example.auramusic.ACTION_PLAY_PAUSE"
-    const val ACTION_PREV = "com.example.auramusic.ACTION_PREV"
-    const val ACTION_NEXT = "com.example.auramusic.ACTION_NEXT"
+    const val ACTION_PLAY_PAUSE = "org.anmon.auramusic.ACTION_PLAY_PAUSE"
+    const val ACTION_PREV = "org.anmon.auramusic.ACTION_PREV"
+    const val ACTION_NEXT = "org.anmon.auramusic.ACTION_NEXT"
 
     fun updateAllWidgets(context: Context, track: Track?, isPlaying: Boolean) {
         val appWidgetManager = AppWidgetManager.getInstance(context)
