@@ -177,4 +177,39 @@ class ExampleRobolectricTest {
     val vm2 = MainViewModel(application)
     assertEquals(AppTheme.EMERALD_BLACK, vm2.currentTheme.value)
   }
+
+  @Test
+  fun `car bluetooth disconnect and phone call interruptions keep auto-resume armed`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    PlaybackManagerProvider.reset()
+
+    val tracks = listOf(
+      Track(
+        id = "car_track_1",
+        title = "Highway Drive",
+        artist = "Midnight Synth",
+        album = "Night Drive",
+        durationMs = 200000L,
+        uri = "file:///music/highway.mp3"
+      )
+    )
+
+    val manager = PlaybackManagerProvider.get(context)
+    manager.playQueue(tracks, startIndex = 0)
+    org.junit.Assert.assertTrue(manager.userIntendsPlayback)
+
+    // Simulate car head unit sending AVRCP pause right before cutting Bluetooth power
+    manager.onExternalPauseRequest()
+    manager.onBluetoothOrOutputDisconnected()
+
+    org.junit.Assert.assertTrue(manager.userIntendsPlayback)
+    org.junit.Assert.assertTrue(manager.isWaitingForBluetoothOrOutputReconnect)
+    org.junit.Assert.assertTrue(manager.isWaitingToAutoResume)
+
+    // Simulate manual user pause clearing auto-resume intent
+    manager.resumePlayback()
+    manager.playPause()
+    org.junit.Assert.assertFalse(manager.userIntendsPlayback)
+    org.junit.Assert.assertFalse(manager.isWaitingToAutoResume)
+  }
 }

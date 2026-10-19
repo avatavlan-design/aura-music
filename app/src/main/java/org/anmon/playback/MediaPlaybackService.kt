@@ -1,5 +1,6 @@
 package org.anmon.playback
 
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
@@ -11,7 +12,7 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import androidx.core.app.ServiceCompat
-import org.anmon.model.Track
+import androidx.media.session.MediaButtonReceiver
 import org.anmon.widget.WidgetUpdater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -19,18 +20,24 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MediaPlaybackService : Service() {
     private val TAG = "MediaPlaybackService"
     private var mediaSession: MediaSessionCompat? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var isForegroundService: Boolean = false
 
     companion object {
+        @Volatile
         var currentSessionToken: MediaSessionCompat.Token? = null
+        @Volatile
+        var isServiceRunning: Boolean = false
     }
 
     override fun onCreate() {
         super.onCreate()
+        isServiceRunning = true
         MediaNotificationManager.createNotificationChannel(this)
 
         val playbackManager = PlaybackManagerProvider.get(this)
@@ -42,9 +49,7 @@ class MediaPlaybackService : Service() {
                 }
 
                 override fun onPause() {
-                    if (playbackManager.playbackState.value.isPlaying) {
-                        playbackManager.playPause()
-                    }
+                    playbackManager.onExternalPauseRequest()
                 }
 
                 override fun onSkipToNext() {
@@ -60,9 +65,7 @@ class MediaPlaybackService : Service() {
                 }
 
                 override fun onStop() {
-                    if (playbackManager.playbackState.value.isPlaying) {
-                        playbackManager.playPause()
-                    }
+                    playbackManager.onExternalPauseRequest()
                 }
             })
             isActive = true
@@ -70,11 +73,11 @@ class MediaPlaybackService : Service() {
         mediaSession = session
         currentSessionToken = session.sessionToken
 
-        // Observe playback state to manage foreground status and lockscreen media updates
+        // Observe playback state sequentially on Main thread; collectLatest cancels any stale artwork loads
         serviceScope.launch {
             playbackManager.playbackState.collectLatest { state ->
                 updateMediaSessionState(state)
-                updateForegroundState(state)
+                updateForegroundStateSuspend(state)
             }
         }
     }
@@ -82,10 +85,33 @@ class MediaPlaybackService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        isServiceRunning = true
+        if (intent != null) {
+            try {
+                MediaButtonReceiver.handleIntent(mediaSession, intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to handle media button intent", e)
+            }
+        }
+
         val playbackManager = PlaybackManagerProvider.get(this)
         val state = playbackManager.playbackState.value
         updateMediaSessionState(state)
-        updateForegroundState(state)
+
+        // Ensure Android 12+ strict foreground start timing is immediately satisfied on onStartCommand
+        val track = state.currentTrack
+        if (track != null && (state.isPlaying || isForegroundService || playbackManager.isWaitingToAutoResume)) {
+            val fastBitmap = MediaNotificationManager.getCachedArtworkBitmap(track)
+                ?: MediaNotificationManager.createProceduralBitmap(track)
+            val initialNotification = MediaNotificationManager.buildNotification(
+                this,
+                track,
+                state.isPlaying,
+                fastBitmap
+            )
+            promoteToForeground(initialNotification)
+        }
+
         return START_STICKY
     }
 
@@ -127,90 +153,120 @@ class MediaPlaybackService : Service() {
         }
     }
 
-    private fun updateForegroundState(state: PlaybackState) {
+    private suspend fun updateForegroundStateSuspend(state: PlaybackState) {
         val track = state.currentTrack
+        val playbackManager = PlaybackManagerProvider.get(this)
+
         if (track == null) {
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
+            if (isForegroundService) {
+                try {
+                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                } catch (_: Exception) {}
+                isForegroundService = false
+            }
+            MediaNotificationManager.cancelNotification(this)
             WidgetUpdater.updateAllWidgets(this, null, false)
             return
         }
 
-        // Start foreground synchronously with procedural placeholder first if playing,
-        // so Android 12+ strict foreground start timing is always satisfied.
-        if (state.isPlaying) {
-            try {
-                val quickBitmap = MediaNotificationManager.createProceduralBitmap(track)
-                val initialNotification = MediaNotificationManager.buildNotification(
-                    this,
-                    track,
-                    true,
-                    quickBitmap
-                )
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    ServiceCompat.startForeground(
-                        this,
-                        MediaNotificationManager.NOTIFICATION_ID,
-                        initialNotification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                    )
-                } else {
-                    startForeground(MediaNotificationManager.NOTIFICATION_ID, initialNotification)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting initial foreground notification", e)
-            }
-        }
+        // Sync home screen widgets immediately
+        WidgetUpdater.updateAllWidgets(this, track, state.isPlaying)
 
-        serviceScope.launch(Dispatchers.IO) {
-            val artBitmap = MediaNotificationManager.getArtworkBitmap(this@MediaPlaybackService, track)
+        val shouldKeepInForeground = state.isPlaying || isForegroundService || playbackManager.isWaitingToAutoResume
+
+        // Fast path: if artwork for this track is already cached in memory, update immediately without IO
+        val cachedBitmap = MediaNotificationManager.getCachedArtworkBitmap(track)
+        if (cachedBitmap != null) {
             val notification = MediaNotificationManager.buildNotification(
-                this@MediaPlaybackService,
+                this,
                 track,
                 state.isPlaying,
-                artBitmap
+                cachedBitmap
             )
-
-            try {
-                if (state.isPlaying) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        ServiceCompat.startForeground(
-                            this@MediaPlaybackService,
-                            MediaNotificationManager.NOTIFICATION_ID,
-                            notification,
-                            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                        )
-                    } else {
-                        startForeground(MediaNotificationManager.NOTIFICATION_ID, notification)
-                    }
-                } else {
-                    // When paused (e.g. due to external video/audio focus loss), detach foreground
-                    // without removing the notification so the user can resume playback anytime.
-                    ServiceCompat.stopForeground(
-                        this@MediaPlaybackService,
-                        ServiceCompat.STOP_FOREGROUND_DETACH
-                    )
-                    val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-                    notificationManager.notify(MediaNotificationManager.NOTIFICATION_ID, notification)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error updating foreground notification", e)
-            }
+            postOrPromoteNotification(notification, shouldKeepInForeground)
+            return
         }
 
-        // Also ensure home screen widgets are synced
-        WidgetUpdater.updateAllWidgets(this, state.currentTrack, state.isPlaying)
+        // Slow path (new track): satisfy foreground requirement immediately with procedural art first
+        if (shouldKeepInForeground && !isForegroundService) {
+            val quickBitmap = MediaNotificationManager.createProceduralBitmap(track)
+            val quickNotification = MediaNotificationManager.buildNotification(
+                this,
+                track,
+                state.isPlaying,
+                quickBitmap
+            )
+            promoteToForeground(quickNotification)
+        }
+
+        // Decode embedded ID3 artwork on IO; cancelled automatically by collectLatest if state changes
+        val resolvedBitmap = withContext(Dispatchers.IO) {
+            MediaNotificationManager.getArtworkBitmap(this@MediaPlaybackService, track)
+        }
+
+        val finalNotification = MediaNotificationManager.buildNotification(
+            this,
+            track,
+            state.isPlaying,
+            resolvedBitmap
+        )
+        postOrPromoteNotification(finalNotification, shouldKeepInForeground)
+    }
+
+    private fun postOrPromoteNotification(notification: Notification, keepInForeground: Boolean) {
+        if (keepInForeground) {
+            promoteToForeground(notification)
+        } else {
+            try {
+                val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                notificationManager.notify(MediaNotificationManager.NOTIFICATION_ID, notification)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error posting media notification", e)
+            }
+        }
+    }
+
+    private fun promoteToForeground(notification: Notification) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    MediaNotificationManager.NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                )
+            } else {
+                startForeground(MediaNotificationManager.NOTIFICATION_ID, notification)
+            }
+            isForegroundService = true
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to promote service to foreground; falling back to notification manager", e)
+            try {
+                val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                notificationManager.notify(MediaNotificationManager.NOTIFICATION_ID, notification)
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val manager = PlaybackManagerProvider.get(this)
         manager.savePlaybackSession()
-        if (!manager.playbackState.value.isPlaying) {
+        if (!manager.playbackState.value.isPlaying && !manager.isWaitingToAutoResume) {
+            if (isForegroundService) {
+                try {
+                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                } catch (_: Exception) {}
+                isForegroundService = false
+            }
+            MediaNotificationManager.cancelNotification(this)
             stopSelf()
         }
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
+        isServiceRunning = false
+        isForegroundService = false
         try {
             PlaybackManagerProvider.get(this).savePlaybackSession()
         } catch (_: Exception) {}

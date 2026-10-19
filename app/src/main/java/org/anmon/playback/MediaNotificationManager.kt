@@ -28,6 +28,11 @@ object MediaNotificationManager {
     const val CHANNEL_ID = "aura_music_playback_channel"
     const val NOTIFICATION_ID = 2002
 
+    @Volatile
+    private var cachedTrackId: String? = null
+    @Volatile
+    private var cachedArtworkBitmap: Bitmap? = null
+
     fun createNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -44,9 +49,21 @@ object MediaNotificationManager {
         }
     }
 
+    fun getCachedArtworkBitmap(track: Track): Bitmap? {
+        return if (cachedTrackId == track.id) cachedArtworkBitmap else null
+    }
+
     fun updateNotification(context: Context, track: Track?, isPlaying: Boolean) {
         if (track == null) {
             cancelNotification(context)
+            return
+        }
+
+        val existingArt = getCachedArtworkBitmap(track)
+        if (existingArt != null) {
+            val notification = buildNotification(context, track, isPlaying, existingArt)
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, notification)
             return
         }
 
@@ -127,7 +144,7 @@ object MediaNotificationManager {
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setShowWhen(false)
             .setAutoCancel(false)
-            .setOngoing(isPlaying)
+            .setOngoing(true)
             .addAction(R.drawable.ic_widget_prev, "Previous", prevPendingIntent)
             .addAction(playPauseIcon, playPauseTitle, playPausePendingIntent)
             .addAction(R.drawable.ic_widget_next, "Next", nextPendingIntent)
@@ -146,16 +163,22 @@ object MediaNotificationManager {
     }
 
     suspend fun getArtworkBitmap(context: Context, track: Track): Bitmap? {
+        val cached = getCachedArtworkBitmap(track)
+        if (cached != null) return cached
+
         val bytes = ArtworkCache.getArtworkBytes(context, track)
-        return if (bytes != null && bytes.isNotEmpty()) {
+        val resolved = if (bytes != null && bytes.isNotEmpty()) {
             try {
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: createProceduralBitmap(track)
             } catch (_: Exception) {
-                null
+                createProceduralBitmap(track)
             }
         } else {
             createProceduralBitmap(track)
         }
+        cachedTrackId = track.id
+        cachedArtworkBitmap = resolved
+        return resolved
     }
 
     fun createProceduralBitmap(track: Track): Bitmap {
