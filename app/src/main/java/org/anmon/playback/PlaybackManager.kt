@@ -1,6 +1,9 @@
 package org.anmon.playback
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -9,6 +12,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -81,6 +85,15 @@ class PlaybackManager(
     @Volatile
     var isWaitingForBluetoothOrOutputReconnect: Boolean = false
         private set
+    @Volatile
+    var wasPlayingOnExternalOutput: Boolean = false
+        private set
+    @Volatile
+    var externalOutputDisconnectedDuringInterruption: Boolean = false
+        private set
+
+    // Optional override for deterministic unit testing of Bluetooth/external output connection state
+    var externalOutputConnectedOverrideForTesting: Boolean? = null
 
     val isWaitingToAutoResume: Boolean
         get() = userIntendsPlayback && (isWaitingForCallOrFocusRecovery || isWaitingForBluetoothOrOutputReconnect)
@@ -90,11 +103,30 @@ class PlaybackManager(
     private var lastAutoResumeTimestampMs: Long = 0L
     private var initialDeviceCallbackFired: Boolean = false
     private var audioDeviceCallbackRegistered: Boolean = false
+    private var noisyReceiverRegistered: Boolean = false
+
+    // Persistent noisy receiver that stays active even while ExoPlayer is suppressed during a call
+    private val noisyBroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                if (userIntendsPlayback || _playbackState.value.isPlaying || isWaitingForCallOrFocusRecovery) {
+                    wasPlayingOnExternalOutput = true
+                    externalOutputDisconnectedDuringInterruption = true
+                    onBluetoothOrOutputDisconnected()
+                }
+            }
+        }
+    }
 
     private val audioDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
             if (!initialDeviceCallbackFired) {
                 initialDeviceCallbackFired = true
+                if (addedDevices.any { it.isSink && isExternalMediaOutputDevice(it.type) } &&
+                    (_playbackState.value.isPlaying || userIntendsPlayback)
+                ) {
+                    wasPlayingOnExternalOutput = true
+                }
                 return
             }
             val hasScoCallDevice = addedDevices.any { it.isSink && it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
@@ -104,19 +136,29 @@ class PlaybackManager(
 
             val hasExternalMediaOutput = addedDevices.any { it.isSink && isExternalMediaOutputDevice(it.type) }
             if (hasExternalMediaOutput) {
+                if (_playbackState.value.isPlaying || userIntendsPlayback) {
+                    wasPlayingOnExternalOutput = true
+                }
+                externalOutputDisconnectedDuringInterruption = false
                 onBluetoothOrOutputReconnected()
             }
         }
 
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+            val removedExternalMediaOutput = removedDevices.any { it.isSink && isExternalMediaOutputDevice(it.type) }
+            if (removedExternalMediaOutput) {
+                if (userIntendsPlayback || _playbackState.value.isPlaying || isWaitingForCallOrFocusRecovery ||
+                    (System.currentTimeMillis() - lastExternalPauseTimestampMs) <= 4_000L
+                ) {
+                    wasPlayingOnExternalOutput = true
+                    externalOutputDisconnectedDuringInterruption = true
+                }
+                onBluetoothOrOutputDisconnected()
+            }
+
             val removedScoCallDevice = removedDevices.any { it.isSink && it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
             if (removedScoCallDevice && isWaitingForCallOrFocusRecovery && userIntendsPlayback) {
                 startCallAndFocusRecoveryMonitor(verifyCallStarted = false)
-            }
-
-            val removedExternalMediaOutput = removedDevices.any { it.isSink && isExternalMediaOutputDevice(it.type) }
-            if (removedExternalMediaOutput) {
-                onBluetoothOrOutputDisconnected()
             }
         }
     }
@@ -128,25 +170,46 @@ class PlaybackManager(
     }
 
     private fun registerAudioDeviceMonitoring() {
-        if (audioDeviceCallbackRegistered) return
-        try {
-            initialDeviceCallbackFired = false
-            audioManager?.registerAudioDeviceCallback(
-                audioDeviceCallback,
-                Handler(Looper.getMainLooper())
-            )
-            audioDeviceCallbackRegistered = true
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to register AudioDeviceCallback", e)
+        if (!audioDeviceCallbackRegistered) {
+            try {
+                initialDeviceCallbackFired = false
+                audioManager?.registerAudioDeviceCallback(
+                    audioDeviceCallback,
+                    Handler(Looper.getMainLooper())
+                )
+                audioDeviceCallbackRegistered = true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to register AudioDeviceCallback", e)
+            }
+        }
+        if (!noisyReceiverRegistered) {
+            try {
+                ContextCompat.registerReceiver(
+                    context,
+                    noisyBroadcastReceiver,
+                    IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+                    ContextCompat.RECEIVER_EXPORTED
+                )
+                noisyReceiverRegistered = true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to register noisy broadcast receiver", e)
+            }
         }
     }
 
     private fun unregisterAudioDeviceMonitoring() {
-        if (!audioDeviceCallbackRegistered) return
-        try {
-            audioManager?.unregisterAudioDeviceCallback(audioDeviceCallback)
-        } catch (_: Exception) {}
-        audioDeviceCallbackRegistered = false
+        if (audioDeviceCallbackRegistered) {
+            try {
+                audioManager?.unregisterAudioDeviceCallback(audioDeviceCallback)
+            } catch (_: Exception) {}
+            audioDeviceCallbackRegistered = false
+        }
+        if (noisyReceiverRegistered) {
+            try {
+                context.unregisterReceiver(noisyBroadcastReceiver)
+            } catch (_: Exception) {}
+            noisyReceiverRegistered = false
+        }
     }
 
     fun isPhoneCallActive(): Boolean {
@@ -158,6 +221,21 @@ class PlaybackManager(
             AudioManager.MODE_CALL_SCREENING -> true
             else -> false
         }
+    }
+
+    fun isExternalMediaOutputConnected(): Boolean {
+        externalOutputConnectedOverrideForTesting?.let { return it }
+        val am = audioManager ?: return false
+        return try {
+            val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            devices.any { it.isSink && isExternalMediaOutputDevice(it.type) }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun requiresExternalOutputForAutoResume(): Boolean {
+        return wasPlayingOnExternalOutput || externalOutputDisconnectedDuringInterruption
     }
 
     private fun isExternalMediaOutputDevice(type: Int): Boolean {
@@ -204,16 +282,20 @@ class PlaybackManager(
     fun onBluetoothOrOutputDisconnected() {
         val now = System.currentTimeMillis()
         val recentlyExternallyPaused = (now - lastExternalPauseTimestampMs) <= 4_000L
-        if (userIntendsPlayback || _playbackState.value.isPlaying || recentlyExternallyPaused) {
+        if (userIntendsPlayback || _playbackState.value.isPlaying || isWaitingForCallOrFocusRecovery || recentlyExternallyPaused) {
             userIntendsPlayback = true
+            wasPlayingOnExternalOutput = true
+            externalOutputDisconnectedDuringInterruption = true
             isWaitingForBluetoothOrOutputReconnect = true
             lastInterruptionTimestampMs = now
             acquireRecoveryWakeLock()
 
             val pos = (_exoPlayer?.currentPosition ?: 0L).coerceAtLeast(_playbackState.value.currentPositionMs)
-            if (_exoPlayer?.isPlaying == true) {
-                _exoPlayer?.pause()
-            }
+            // Always set playWhenReady = false and pause even if currently suppressed by a phone/VoIP call,
+            // so ExoPlayer cannot auto-start on the phone speakers when the call ends!
+            _exoPlayer?.playWhenReady = false
+            _exoPlayer?.pause()
+
             updateState { it.copy(isPlaying = false, currentPositionMs = pos) }
             savePlaybackSession()
             syncWidgetsAndNotification()
@@ -230,20 +312,21 @@ class PlaybackManager(
             return
         }
 
+        externalOutputDisconnectedDuringInterruption = false
         bluetoothReconnectJob?.cancel()
         bluetoothReconnectJob = scope.launch(Dispatchers.Main) {
             // Allow 750ms for Bluetooth A2DP sink routing handshake to stabilize
             delay(750)
-            if (userIntendsPlayback && !isPhoneCallActive()) {
+            if (userIntendsPlayback && !isPhoneCallActive() && isExternalMediaOutputConnected()) {
                 isWaitingForBluetoothOrOutputReconnect = false
                 lastAutoResumeTimestampMs = System.currentTimeMillis()
-                resumePlayback()
+                resumePlayback(fromExplicitUserAction = false)
 
                 // Follow-up check for head units that take an extra moment to activate the A2DP stream
                 delay(1500)
-                if (userIntendsPlayback && !isPhoneCallActive() && !_playbackState.value.isPlaying) {
+                if (userIntendsPlayback && !isPhoneCallActive() && !_playbackState.value.isPlaying && isExternalMediaOutputConnected()) {
                     lastAutoResumeTimestampMs = System.currentTimeMillis()
-                    resumePlayback()
+                    resumePlayback(fromExplicitUserAction = false)
                 }
                 if (!isWaitingForCallOrFocusRecovery) {
                     releaseRecoveryWakeLock()
@@ -252,11 +335,27 @@ class PlaybackManager(
         }
     }
 
+    /**
+     * Synchronous check used when a phone/VoIP call ends to decide whether playback is allowed
+     * to auto-resume or must stay paused because the Bluetooth device disconnected.
+     */
+    fun canAutoResumeAfterCallEnded(): Boolean {
+        if (!userIntendsPlayback || isPhoneCallActive()) return false
+        if (requiresExternalOutputForAutoResume() && !isExternalMediaOutputConnected()) {
+            return false
+        }
+        return true
+    }
+
     fun onCallOrFocusInterruptionStarted(verifyCallStarted: Boolean = false) {
         val now = System.currentTimeMillis()
         val recentlyExternallyPaused = (now - lastExternalPauseTimestampMs) <= 4_000L
         if (!userIntendsPlayback && !_playbackState.value.isPlaying && !recentlyExternallyPaused) {
             return
+        }
+
+        if (isExternalMediaOutputConnected()) {
+            wasPlayingOnExternalOutput = true
         }
 
         userIntendsPlayback = true
@@ -298,24 +397,54 @@ class PlaybackManager(
                 val suppression = _exoPlayer?.playbackSuppressionReason ?: Player.PLAYBACK_SUPPRESSION_REASON_NONE
                 val callActive = isPhoneCallActive()
                 if (!callActive && suppression == Player.PLAYBACK_SUPPRESSION_REASON_NONE) {
+                    // If playback was on Bluetooth/external output and that output is not connected right now,
+                    // immediately ensure ExoPlayer is paused so nothing leaks through the phone speakers.
+                    if (requiresExternalOutputForAutoResume() && !isExternalMediaOutputConnected()) {
+                        _exoPlayer?.playWhenReady = false
+                        _exoPlayer?.pause()
+                    }
+
                     // Wait briefly for voice-to-media audio route (e.g. car HFP -> A2DP) to settle
                     delay(750)
                     val stillClear = !isPhoneCallActive() &&
                         (_exoPlayer?.playbackSuppressionReason ?: Player.PLAYBACK_SUPPRESSION_REASON_NONE) == Player.PLAYBACK_SUPPRESSION_REASON_NONE
+
                     if (stillClear && userIntendsPlayback) {
+                        if (requiresExternalOutputForAutoResume()) {
+                            // If Bluetooth was NOT explicitly disconnected during the call, allow up to 1.5s
+                            // for Bluetooth HFP -> A2DP profile handover to complete before giving up.
+                            if (!externalOutputDisconnectedDuringInterruption && !isExternalMediaOutputConnected()) {
+                                for (attempt in 0 until 6) {
+                                    delay(250)
+                                    if (isExternalMediaOutputConnected()) break
+                                }
+                            }
+
+                            if (!isExternalMediaOutputConnected()) {
+                                // Bluetooth device is disconnected! Stay paused instead of playing out of phone speakers.
+                                _exoPlayer?.playWhenReady = false
+                                _exoPlayer?.pause()
+                                isWaitingForCallOrFocusRecovery = false
+                                isWaitingForBluetoothOrOutputReconnect = true
+                                updateState { it.copy(isPlaying = false) }
+                                savePlaybackSession()
+                                syncWidgetsAndNotification()
+                                break
+                            }
+                        }
+
                         isWaitingForCallOrFocusRecovery = false
-                        // Keep Bluetooth reconnect flag armed briefly in case car A2DP reconnects 1-3s after call hangup
-                        isWaitingForBluetoothOrOutputReconnect = true
+                        isWaitingForBluetoothOrOutputReconnect = false
+                        externalOutputDisconnectedDuringInterruption = false
                         lastInterruptionTimestampMs = System.currentTimeMillis()
                         lastAutoResumeTimestampMs = System.currentTimeMillis()
-                        resumePlayback()
+                        resumePlayback(fromExplicitUserAction = false)
 
                         delay(1800)
-                        if (userIntendsPlayback && !isPhoneCallActive() && !_playbackState.value.isPlaying) {
+                        if (userIntendsPlayback && !isPhoneCallActive() && !_playbackState.value.isPlaying && canAutoResumeAfterCallEnded()) {
                             lastAutoResumeTimestampMs = System.currentTimeMillis()
-                            resumePlayback()
+                            resumePlayback(fromExplicitUserAction = false)
                         }
-                        isWaitingForBluetoothOrOutputReconnect = false
                         releaseRecoveryWakeLock()
                         break
                     }
@@ -380,6 +509,24 @@ class PlaybackManager(
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    // Guard against ExoPlayer auto-resuming onto phone speakers after a call when Bluetooth was lost
+                    if (requiresExternalOutputForAutoResume() && !isExternalMediaOutputConnected()) {
+                        player.playWhenReady = false
+                        player.pause()
+                        isWaitingForCallOrFocusRecovery = false
+                        isWaitingForBluetoothOrOutputReconnect = true
+                        updateState { it.copy(isPlaying = false) }
+                        savePlaybackSession()
+                        syncWidgetsAndNotification()
+                        return
+                    }
+                    if (isExternalMediaOutputConnected()) {
+                        wasPlayingOnExternalOutput = true
+                        externalOutputDisconnectedDuringInterruption = false
+                    }
+                }
+
                 val currentPos = player.currentPosition.coerceAtLeast(0L)
                 val resolvedPos = if (currentPos > 0L) currentPos else _playbackState.value.currentPositionMs
                 val resolvedDur = if (player.duration > 0L) player.duration else _playbackState.value.durationMs
@@ -408,7 +555,8 @@ class PlaybackManager(
 
                     when (reason) {
                         Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY -> {
-                            // Either car Bluetooth radio turned off/restarted, or Bluetooth switched from A2DP to HFP for a phone call
+                            wasPlayingOnExternalOutput = true
+                            externalOutputDisconnectedDuringInterruption = true
                             if (isPhoneCallActive() || isWaitingForCallOrFocusRecovery) {
                                 isWaitingForBluetoothOrOutputReconnect = true
                                 lastInterruptionTimestampMs = System.currentTimeMillis()
@@ -432,10 +580,23 @@ class PlaybackManager(
 
             override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) {
                 if (playbackSuppressionReason != Player.PLAYBACK_SUPPRESSION_REASON_NONE) {
-                    // Transient audio focus loss (e.g. phone call ringing, voice call, or video):
+                    // Transient audio focus loss (e.g. Snapchat call, cellular call, or video):
                     onCallOrFocusInterruptionStarted(verifyCallStarted = false)
-                } else if (isWaitingForCallOrFocusRecovery && userIntendsPlayback && !isPhoneCallActive()) {
-                    startCallAndFocusRecoveryMonitor(verifyCallStarted = false)
+                } else {
+                    // Transient suppression just cleared (call ended)!
+                    // If playback was on a Bluetooth/external device that is no longer connected,
+                    // immediately pause ExoPlayer so it does NOT play out of the phone speakers!
+                    if (requiresExternalOutputForAutoResume() && !isExternalMediaOutputConnected()) {
+                        player.playWhenReady = false
+                        player.pause()
+                        val pos = player.currentPosition.coerceAtLeast(_playbackState.value.currentPositionMs)
+                        updateState { it.copy(isPlaying = false, currentPositionMs = pos) }
+                        savePlaybackSession()
+                        syncWidgetsAndNotification()
+                    }
+                    if (isWaitingForCallOrFocusRecovery && userIntendsPlayback && !isPhoneCallActive()) {
+                        startCallAndFocusRecoveryMonitor(verifyCallStarted = false)
+                    }
                 }
             }
 
@@ -458,6 +619,7 @@ class PlaybackManager(
                             userIntendsPlayback = false
                             isWaitingForCallOrFocusRecovery = false
                             isWaitingForBluetoothOrOutputReconnect = false
+                            externalOutputDisconnectedDuringInterruption = false
                             releaseRecoveryWakeLock()
                             updateState { it.copy(isPlaying = false, currentPositionMs = 0L) }
                             stopProgressTicker()
@@ -490,6 +652,9 @@ class PlaybackManager(
             while (isActive) {
                 val player = _exoPlayer
                 if (player != null && player.isPlaying) {
+                    if (!wasPlayingOnExternalOutput && isExternalMediaOutputConnected()) {
+                        wasPlayingOnExternalOutput = true
+                    }
                     val pos = player.currentPosition.coerceAtLeast(0L)
                     val dur = if (player.duration > 0L) player.duration else _playbackState.value.durationMs
                     updateState {
@@ -523,6 +688,8 @@ class PlaybackManager(
         if (tracks.isEmpty()) return
 
         userIntendsPlayback = true
+        wasPlayingOnExternalOutput = isExternalMediaOutputConnected()
+        externalOutputDisconnectedDuringInterruption = false
         isWaitingForCallOrFocusRecovery = false
         isWaitingForBluetoothOrOutputReconnect = false
         callRecoveryJob?.cancel()
@@ -604,6 +771,7 @@ class PlaybackManager(
             userIntendsPlayback = false
             isWaitingForCallOrFocusRecovery = false
             isWaitingForBluetoothOrOutputReconnect = false
+            externalOutputDisconnectedDuringInterruption = false
             callRecoveryJob?.cancel()
             bluetoothReconnectJob?.cancel()
             releaseRecoveryWakeLock()
@@ -614,7 +782,7 @@ class PlaybackManager(
             savePlaybackSession()
             syncWidgetsAndNotification()
         } else {
-            resumePlayback()
+            resumePlayback(fromExplicitUserAction = true)
         }
     }
 
@@ -649,8 +817,23 @@ class PlaybackManager(
     /**
      * Resumes playback reliably even after external audio focus loss (e.g. phone call or video),
      * Bluetooth car stereo reboot, decoder release, or background service recreation.
+     *
+     * When [fromExplicitUserAction] is false (automatic recovery), playback will NOT resume
+     * if it was previously playing on a Bluetooth/external device that is now disconnected.
      */
-    fun resumePlayback() {
+    fun resumePlayback(fromExplicitUserAction: Boolean = true) {
+        if (!fromExplicitUserAction && requiresExternalOutputForAutoResume() && !isExternalMediaOutputConnected()) {
+            // Do not auto-resume through phone speakers when Bluetooth/external device is disconnected
+            _exoPlayer?.playWhenReady = false
+            _exoPlayer?.pause()
+            isWaitingForCallOrFocusRecovery = false
+            isWaitingForBluetoothOrOutputReconnect = true
+            updateState { it.copy(isPlaying = false) }
+            savePlaybackSession()
+            syncWidgetsAndNotification()
+            return
+        }
+
         val player = ensurePlayerActive()
         if (activeQueue.isEmpty()) {
             restorePlaybackSession()
@@ -658,6 +841,15 @@ class PlaybackManager(
         if (activeQueue.isEmpty()) return
 
         userIntendsPlayback = true
+        if (fromExplicitUserAction) {
+            wasPlayingOnExternalOutput = isExternalMediaOutputConnected()
+            externalOutputDisconnectedDuringInterruption = false
+            isWaitingForCallOrFocusRecovery = false
+            isWaitingForBluetoothOrOutputReconnect = false
+        } else if (isExternalMediaOutputConnected()) {
+            wasPlayingOnExternalOutput = true
+            externalOutputDisconnectedDuringInterruption = false
+        }
 
         val targetIndex = _playbackState.value.currentIndex.coerceIn(0, activeQueue.size - 1)
         val playerPos = if (player.currentMediaItemIndex == targetIndex) player.currentPosition else 0L
@@ -705,6 +897,8 @@ class PlaybackManager(
         if (activeQueue.isEmpty()) return
 
         userIntendsPlayback = true
+        wasPlayingOnExternalOutput = isExternalMediaOutputConnected()
+        externalOutputDisconnectedDuringInterruption = false
 
         if (player.mediaItemCount == 0 || player.playbackState == Player.STATE_IDLE || player.playerError != null) {
             val nextIdx = ((_playbackState.value.currentIndex + 1) % activeQueue.size).coerceIn(0, activeQueue.size - 1)
@@ -733,6 +927,8 @@ class PlaybackManager(
         if (activeQueue.isEmpty()) return
 
         userIntendsPlayback = true
+        wasPlayingOnExternalOutput = isExternalMediaOutputConnected()
+        externalOutputDisconnectedDuringInterruption = false
 
         if (player.mediaItemCount == 0 || player.playbackState == Player.STATE_IDLE || player.playerError != null) {
             val prevIdx = (_playbackState.value.currentIndex - 1).coerceAtLeast(0)
@@ -793,6 +989,8 @@ class PlaybackManager(
         val player = ensurePlayerActive()
         if (index in activeQueue.indices) {
             userIntendsPlayback = true
+            wasPlayingOnExternalOutput = isExternalMediaOutputConnected()
+            externalOutputDisconnectedDuringInterruption = false
             if (player.mediaItemCount == 0 || player.playbackState == Player.STATE_IDLE || player.playerError != null) {
                 val mediaItems = activeQueue.map { it.toMediaItem() }
                 player.setMediaItems(mediaItems, index, 0L)
@@ -1021,6 +1219,8 @@ class PlaybackManager(
         userIntendsPlayback = false
         isWaitingForCallOrFocusRecovery = false
         isWaitingForBluetoothOrOutputReconnect = false
+        wasPlayingOnExternalOutput = false
+        externalOutputDisconnectedDuringInterruption = false
         stopProgressTicker()
         callRecoveryJob?.cancel()
         bluetoothReconnectJob?.cancel()

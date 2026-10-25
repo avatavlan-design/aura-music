@@ -212,4 +212,52 @@ class ExampleRobolectricTest {
     org.junit.Assert.assertFalse(manager.userIntendsPlayback)
     org.junit.Assert.assertFalse(manager.isWaitingToAutoResume)
   }
+
+  @Test
+  fun `call ending after bluetooth disconnects during call stays paused instead of playing on phone speaker`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    PlaybackManagerProvider.reset()
+
+    val tracks = listOf(
+      Track(
+        id = "bt_call_track_1",
+        title = "Stereo Session",
+        artist = "Aura Artist",
+        album = "Night Drive",
+        durationMs = 210000L,
+        uri = "file:///music/stereo.mp3"
+      )
+    )
+
+    val manager = PlaybackManagerProvider.get(context)
+    // 1. Start playback while connected to Bluetooth stereo
+    manager.externalOutputConnectedOverrideForTesting = true
+    manager.playQueue(tracks, startIndex = 0)
+    org.junit.Assert.assertTrue(manager.playbackState.value.isPlaying)
+    org.junit.Assert.assertTrue(manager.wasPlayingOnExternalOutput)
+
+    // 2. Receive a third-party VoIP call (e.g. Snapchat) while connected to Bluetooth
+    manager.onCallOrFocusInterruptionStarted()
+    org.junit.Assert.assertTrue(manager.isWaitingForCallOrFocusRecovery)
+
+    // 3. Lose Bluetooth stereo connection while the call is ongoing
+    manager.externalOutputConnectedOverrideForTesting = false
+    manager.onBluetoothOrOutputDisconnected()
+
+    org.junit.Assert.assertTrue(manager.externalOutputDisconnectedDuringInterruption)
+    org.junit.Assert.assertFalse(manager.playbackState.value.isPlaying)
+    org.junit.Assert.assertEquals(false, manager.exoPlayer.playWhenReady)
+
+    // 4. Call ends while Bluetooth is still disconnected: automatic recovery must NOT resume on phone speakers
+    org.junit.Assert.assertFalse(manager.canAutoResumeAfterCallEnded())
+    manager.resumePlayback(fromExplicitUserAction = false)
+    org.junit.Assert.assertFalse(manager.playbackState.value.isPlaying)
+    org.junit.Assert.assertEquals(false, manager.exoPlayer.playWhenReady)
+
+    // 5. Once Bluetooth stereo reconnects, auto-resume is allowed to proceed
+    manager.externalOutputConnectedOverrideForTesting = true
+    org.junit.Assert.assertTrue(manager.canAutoResumeAfterCallEnded())
+    manager.resumePlayback(fromExplicitUserAction = false)
+    org.junit.Assert.assertTrue(manager.playbackState.value.isPlaying)
+  }
 }
