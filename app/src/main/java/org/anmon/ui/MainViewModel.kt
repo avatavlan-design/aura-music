@@ -128,7 +128,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun playAlbum(album: Album, startIndex: Int = 0) {
-        playbackManager.playQueue(album.tracks, startIndex)
+        val sortedTracks = MusicRepository.sortAlbumTracks(album.tracks)
+        playbackManager.playQueue(sortedTracks, startIndex)
         _snackbarMessage.value = "Playing ${album.title}"
     }
 

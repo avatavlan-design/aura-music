@@ -61,14 +61,15 @@ class MusicRepository(
     val albums: StateFlow<List<Album>> = _tracks.map { trackList ->
         trackList.groupBy { it.album.ifEmpty { "Unknown Album" } }
             .map { (albumTitle, albumTracks) ->
-                val primaryArtist = albumTracks.firstOrNull()?.artist ?: "Unknown Artist"
+                val sortedAlbumTracks = sortAlbumTracks(albumTracks)
+                val primaryArtist = sortedAlbumTracks.firstOrNull()?.artist ?: "Unknown Artist"
                 Album(
                     id = albumTitle.lowercase().replace(" ", "_"),
                     title = albumTitle,
                     artist = primaryArtist,
-                    trackCount = albumTracks.size,
-                    totalDurationMs = albumTracks.sumOf { it.durationMs },
-                    tracks = albumTracks.sortedBy { it.trackNumber }
+                    trackCount = sortedAlbumTracks.size,
+                    totalDurationMs = sortedAlbumTracks.sumOf { it.durationMs },
+                    tracks = sortedAlbumTracks
                 )
             }
             .sortedBy { it.title }
@@ -150,7 +151,7 @@ class MusicRepository(
 
     private fun queryMediaStore(): List<Track> {
         val tracks = mutableListOf<Track>()
-        val projection = arrayOf(
+        val baseProjection = mutableListOf(
             MediaStore.Audio.Media._ID,
             MediaStore.Audio.Media.TITLE,
             MediaStore.Audio.Media.ARTIST,
@@ -162,6 +163,11 @@ class MusicRepository(
             MediaStore.Audio.Media.DATA,
             MediaStore.Audio.Media.DATE_ADDED
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            baseProjection.add(MediaStore.Audio.Media.DISC_NUMBER)
+            baseProjection.add(MediaStore.Audio.Media.CD_TRACK_NUMBER)
+        }
+        val projection = baseProjection.toTypedArray()
 
         val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
         val sortOrder = "${MediaStore.Audio.Media.TITLE} ASC"
@@ -183,6 +189,12 @@ class MusicRepository(
             val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)
             val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
             val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
+            val discCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                cursor.getColumnIndex(MediaStore.Audio.Media.DISC_NUMBER)
+            } else -1
+            val cdTrackCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                cursor.getColumnIndex(MediaStore.Audio.Media.CD_TRACK_NUMBER)
+            } else -1
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
@@ -191,7 +203,9 @@ class MusicRepository(
                 val album = cursor.getString(albumCol) ?: "Unknown Album"
                 val albumId = cursor.getLong(albumIdCol)
                 val duration = cursor.getLong(durCol)
-                val trackNum = cursor.getInt(trackCol) % 1000
+                val rawTrack = cursor.getInt(trackCol)
+                val discTag = if (discCol >= 0) cursor.getString(discCol) else null
+                val cdTrackTag = if (cdTrackCol >= 0) cursor.getString(cdTrackCol) else null
                 val mimeType = cursor.getString(mimeCol) ?: "audio/mpeg"
                 val path = cursor.getString(dataCol)
                 val dateAdded = cursor.getLong(dateCol) * 1000
@@ -203,6 +217,14 @@ class MusicRepository(
                     File(path).parentFile?.name ?: "Device Music"
                 } else "Device Music"
 
+                val (discNum, trackNum) = parseDiscAndTrackNumbers(
+                    rawTrackColumn = rawTrack,
+                    cdTrackTag = cdTrackTag,
+                    discNumberTag = discTag,
+                    filePathOrName = path,
+                    parentFolderName = folderName
+                )
+
                 val ext = path?.substringAfterLast('.', "")?.lowercase() ?: ""
                 val isWav = ext == "wav" || mimeType.contains("wav")
                 val hasArtwork = !isWav && (albumId > 0 || ext in listOf("mp3", "flac", "m4a", "ogg", "opus"))
@@ -213,7 +235,8 @@ class MusicRepository(
                         title = title,
                         artist = if (artist.contains("<unknown>")) "Unknown Artist" else artist,
                         album = if (album.contains("<unknown>")) "Unknown Album" else album,
-                        trackNumber = if (trackNum <= 0) 1 else trackNum,
+                        trackNumber = trackNum,
+                        discNumber = discNum,
                         durationMs = duration,
                         uri = contentUri.toString(),
                         filePath = path,
@@ -233,55 +256,75 @@ class MusicRepository(
     private fun scanFolder(folderUriStr: String): List<Track> {
         val tracks = mutableListOf<Track>()
         val uri = Uri.parse(folderUriStr)
-        val docFolder = DocumentFile.fromTreeUri(context, uri) ?: return tracks
+        val rootFolder = DocumentFile.fromTreeUri(context, uri) ?: return tracks
+        val rootFolderName = rootFolder.name ?: "Selected Folder"
 
-        for (docFile in docFolder.listFiles()) {
-            if (docFile.isFile && isAudioFile(docFile.type, docFile.name)) {
-                val fileUri = docFile.uri
-                val name = docFile.name ?: "Unknown"
+        fun scanDocFolder(currentFolder: DocumentFile, depth: Int) {
+            if (depth > 3) return
+            val parentName = currentFolder.name ?: rootFolderName
+            for (docFile in currentFolder.listFiles()) {
+                if (docFile.isDirectory) {
+                    scanDocFolder(docFile, depth + 1)
+                } else if (docFile.isFile && isAudioFile(docFile.type, docFile.name)) {
+                    val fileUri = docFile.uri
+                    val name = docFile.name ?: "Unknown"
 
-                // Extract metadata using retriever
-                var title = name.substringBeforeLast('.')
-                var artist = "Unknown Artist"
-                var album = docFolder.name ?: "Unknown Album"
-                var durationMs = 0L
-                var trackNum = 1
-                var mimeType = docFile.type ?: "audio/mpeg"
+                    // Extract metadata using retriever
+                    var title = name.substringBeforeLast('.')
+                    var artist = "Unknown Artist"
+                    var album = rootFolderName
+                    var durationMs = 0L
+                    var cdTrackTag: String? = null
+                    var discTag: String? = null
+                    var mimeType = docFile.type ?: "audio/mpeg"
 
-                try {
-                    val retriever = MediaMetadataRetriever()
-                    retriever.setDataSource(context, fileUri)
-                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.let { title = it }
-                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.let { artist = it }
-                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.let { album = it }
-                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { durationMs = it }
-                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)?.toIntOrNull()?.let { trackNum = it % 1000 }
-                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)?.let { mimeType = it }
-                    retriever.release()
-                } catch (e: Exception) {
-                    Log.w("MusicRepository", "Could not extract full ID3 tags from $fileUri", e)
-                }
+                    try {
+                        val retriever = MediaMetadataRetriever()
+                        retriever.setDataSource(context, fileUri)
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() }?.let { title = it }
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.takeIf { it.isNotBlank() }?.let { artist = it }
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.takeIf { it.isNotBlank() }?.let { album = it }
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { durationMs = it }
+                        cdTrackTag = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)
+                        discTag = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER)
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)?.takeIf { it.isNotBlank() }?.let { mimeType = it }
+                        retriever.release()
+                    } catch (e: Exception) {
+                        Log.w("MusicRepository", "Could not extract full ID3 tags from $fileUri", e)
+                    }
 
-                val ext = name.substringAfterLast('.', "").lowercase()
-                val isWav = ext == "wav" || mimeType.contains("wav") || ext == "mid"
-                val hasArtwork = !isWav && ext in listOf("mp3", "flac", "m4a", "ogg", "opus")
-
-                tracks.add(
-                    Track(
-                        id = "folder_${fileUri.hashCode()}",
-                        title = title,
-                        artist = artist,
-                        album = album,
-                        trackNumber = trackNum,
-                        durationMs = durationMs,
-                        uri = fileUri.toString(),
-                        mimeType = mimeType,
-                        folderPath = docFolder.name ?: "Selected Folder",
-                        hasEmbeddedArtwork = hasArtwork
+                    val (discNum, trackNum) = parseDiscAndTrackNumbers(
+                        rawTrackColumn = null,
+                        cdTrackTag = cdTrackTag,
+                        discNumberTag = discTag,
+                        filePathOrName = name,
+                        parentFolderName = parentName
                     )
-                )
+
+                    val ext = name.substringAfterLast('.', "").lowercase()
+                    val isWav = ext == "wav" || mimeType.contains("wav") || ext == "mid"
+                    val hasArtwork = !isWav && ext in listOf("mp3", "flac", "m4a", "ogg", "opus")
+
+                    tracks.add(
+                        Track(
+                            id = "folder_${fileUri.hashCode()}",
+                            title = title,
+                            artist = artist,
+                            album = album,
+                            trackNumber = trackNum,
+                            discNumber = discNum,
+                            durationMs = durationMs,
+                            uri = fileUri.toString(),
+                            mimeType = mimeType,
+                            folderPath = rootFolderName,
+                            hasEmbeddedArtwork = hasArtwork
+                        )
+                    )
+                }
             }
         }
+
+        scanDocFolder(rootFolder, 0)
         return tracks
     }
 
@@ -642,5 +685,123 @@ class MusicRepository(
             array.put(obj)
         }
         prefs.edit().putString("user_playlists", array.toString()).apply()
+    }
+
+    companion object {
+        private val DISC_FOLDER_REGEX = Regex("""(?i)(?:^|[/\\_\-\s(\[])(?:disc|disk|cd)\s*0*(\d{1,2})(?:$|[/\\_\-\s)\]])""")
+        private val DISC_TRACK_FILENAME_REGEX = Regex("""^\s*0*(\d{1,2})\s*[-._]\s*0*(\d{1,3})(?:\s*[-._\s].*|$)""")
+        private val LEADING_TRACK_FILENAME_REGEX = Regex("""^\s*0*(\d{1,3})(?:\s*[-._\s].*)""")
+        private val FIRST_NUMBER_REGEX = Regex("""(\d+)""")
+
+        /**
+         * Sorts album tracks first by discNumber ascending, then by trackNumber ascending,
+         * and finally by title ascending so multi-disc albums play Disc 1 (Track 1..N)
+         * followed by Disc 2 (Track 1..N).
+         */
+        fun sortAlbumTracks(tracks: List<Track>): List<Track> {
+            return tracks.sortedWith(
+                compareBy<Track> { it.discNumber }
+                    .thenBy { it.trackNumber }
+                    .thenBy { it.title.lowercase() }
+            )
+        }
+
+        private fun parseTagPositiveInt(raw: String?): Int? {
+            if (raw.isNullOrBlank()) return null
+            val beforeSlash = raw.substringBefore('/').trim()
+            beforeSlash.toIntOrNull()?.let { if (it > 0) return it }
+            val match = FIRST_NUMBER_REGEX.find(beforeSlash) ?: return null
+            return match.groupValues[1].toIntOrNull()?.takeIf { it > 0 }
+        }
+
+        /**
+         * Extracts `(discNumber, trackNumber)` from MediaStore columns, ID3/Vorbis tags,
+         * or folder/filename conventions.
+         */
+        fun parseDiscAndTrackNumbers(
+            rawTrackColumn: Int? = null,
+            cdTrackTag: String? = null,
+            discNumberTag: String? = null,
+            filePathOrName: String? = null,
+            parentFolderName: String? = null
+        ): Pair<Int, Int> {
+            var discNum: Int? = null
+            var trackNum: Int? = null
+
+            // 1. Parse track number from MediaStore TRACK column or CD_TRACK_NUMBER tag
+            if (rawTrackColumn != null && rawTrackColumn > 0) {
+                val t = if (rawTrackColumn >= 1000) rawTrackColumn % 1000 else rawTrackColumn
+                if (t > 0) {
+                    trackNum = t
+                }
+            }
+            val parsedCdTrack = parseTagPositiveInt(cdTrackTag)
+            if (trackNum == null && parsedCdTrack != null && parsedCdTrack > 0) {
+                val t = if (parsedCdTrack >= 1000) parsedCdTrack % 1000 else parsedCdTrack
+                if (t > 0) {
+                    trackNum = t
+                }
+            }
+
+            // 2. Parse disc number from explicit DISC_NUMBER tag or 1000-encoded TRACK column (e.g. 2001 -> disc 2, track 1)
+            val parsedDiscTag = parseTagPositiveInt(discNumberTag)
+            if (parsedDiscTag != null && parsedDiscTag > 0) {
+                discNum = parsedDiscTag
+            } else if (rawTrackColumn != null && rawTrackColumn >= 1000) {
+                val encodedDisc = rawTrackColumn / 1000
+                if (encodedDisc > 0) {
+                    discNum = encodedDisc
+                }
+            } else if (parsedCdTrack != null && parsedCdTrack >= 1000) {
+                val encodedDisc = parsedCdTrack / 1000
+                if (encodedDisc > 0) {
+                    discNum = encodedDisc
+                }
+            }
+
+            // 3. Fallback: check parent folder name or file path for "Disc 2", "CD2", "Disk 2", etc.
+            if (discNum == null) {
+                val folderMatch = parentFolderName?.let { DISC_FOLDER_REGEX.find(it) }
+                    ?: filePathOrName?.let { DISC_FOLDER_REGEX.find(it) }
+                val folderDisc = folderMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                if (folderDisc != null && folderDisc > 0) {
+                    discNum = folderDisc
+                }
+            }
+
+            // 4. Fallback: check base filename for "1-01 Song.mp3" / "2-01 Song.mp3" or leading track number
+            val baseFileName = filePathOrName
+                ?.substringAfterLast('/')
+                ?.substringAfterLast('\\')
+                ?.substringBeforeLast('.')
+            if (!baseFileName.isNullOrBlank()) {
+                val dtMatch = DISC_TRACK_FILENAME_REGEX.find(baseFileName)
+                if (dtMatch != null) {
+                    val fileDisc = dtMatch.groupValues[1].toIntOrNull()
+                    val fileTrack = dtMatch.groupValues[2].toIntOrNull()
+                    if (discNum == null && fileDisc != null && fileDisc > 0) {
+                        discNum = fileDisc
+                    }
+                    if (trackNum == null && fileTrack != null && fileTrack > 0) {
+                        trackNum = fileTrack
+                    }
+                } else if (trackNum == null) {
+                    val leadMatch = LEADING_TRACK_FILENAME_REGEX.find(baseFileName)
+                    val rawLead = leadMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    if (rawLead != null && rawLead > 0) {
+                        if (rawLead >= 100 && discNum == null) {
+                            // e.g. "101 - Track" or "201 - Track"
+                            discNum = rawLead / 100
+                            val t = rawLead % 100
+                            if (t > 0) trackNum = t
+                        } else {
+                            trackNum = rawLead
+                        }
+                    }
+                }
+            }
+
+            return (discNum ?: 1).coerceAtLeast(1) to (trackNum ?: 1).coerceAtLeast(1)
+        }
     }
 }

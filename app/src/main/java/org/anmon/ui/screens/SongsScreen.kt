@@ -65,7 +65,12 @@ fun SongsScreen(
         when (selectedSort) {
             SortOption.TITLE -> tracks.sortedBy { it.title.lowercase() }
             SortOption.ARTIST -> tracks.sortedBy { it.artist.lowercase() }
-            SortOption.ALBUM -> tracks.sortedBy { it.album.lowercase() }
+            SortOption.ALBUM -> tracks.sortedWith(
+                compareBy<Track> { it.album.lowercase() }
+                    .thenBy { it.discNumber }
+                    .thenBy { it.trackNumber }
+                    .thenBy { it.title.lowercase() }
+            )
             SortOption.DURATION -> tracks.sortedByDescending { it.durationMs }
             SortOption.DATE_ADDED -> tracks.sortedByDescending { it.dateAdded }
         }

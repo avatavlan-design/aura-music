@@ -490,6 +490,9 @@ fun AlbumDetailView(
 
         val listState = androidx.compose.foundation.lazy.rememberLazyListState()
         val isSwipeEnabled = org.anmon.ui.components.rememberScrollCooldown(listState)
+        val sortedAlbumTracks = remember(album.tracks) {
+            org.anmon.data.MusicRepository.sortAlbumTracks(album.tracks)
+        }
 
         LazyColumn(
             state = listState,
@@ -506,7 +509,7 @@ fun AlbumDetailView(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     AlbumArtwork(
-                        track = album.tracks.firstOrNull(),
+                        track = sortedAlbumTracks.firstOrNull(),
                         size = 120.dp,
                         shapeRadius = 16.dp
                     )
@@ -555,7 +558,11 @@ fun AlbumDetailView(
                     }
 
                     FilledTonalButton(
-                        onClick = { onPlayAlbum((0 until album.tracks.size).random()) },
+                        onClick = {
+                            if (sortedAlbumTracks.isNotEmpty()) {
+                                onPlayAlbum((0 until sortedAlbumTracks.size).random())
+                            }
+                        },
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(Icons.Default.Shuffle, contentDescription = "Shuffle")
@@ -565,7 +572,7 @@ fun AlbumDetailView(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            itemsIndexed(album.tracks, key = { _, track -> track.id }) { index, track ->
+            itemsIndexed(sortedAlbumTracks, key = { _, track -> track.id }) { index, track ->
                 SwipeToQueueTrackItem(
                     track = track,
                     isPlaying = isPlaying,

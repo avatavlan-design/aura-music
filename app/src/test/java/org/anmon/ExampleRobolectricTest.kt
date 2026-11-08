@@ -260,4 +260,49 @@ class ExampleRobolectricTest {
     manager.resumePlayback(fromExplicitUserAction = false)
     org.junit.Assert.assertTrue(manager.playbackState.value.isPlaying)
   }
+
+  @Test
+  fun `multi-disc album parses disc numbers and sorts by discNumber first then trackNumber`() {
+    // 1. Verify MediaStore 1000-encoded TRACK column (e.g. 1001 = Disc 1 Track 1, 2001 = Disc 2 Track 1)
+    assertEquals(1 to 1, org.anmon.data.MusicRepository.parseDiscAndTrackNumbers(rawTrackColumn = 1001))
+    assertEquals(2 to 1, org.anmon.data.MusicRepository.parseDiscAndTrackNumbers(rawTrackColumn = 2001))
+    assertEquals(2 to 5, org.anmon.data.MusicRepository.parseDiscAndTrackNumbers(rawTrackColumn = 2005))
+
+    // 2. Verify explicit DISC_NUMBER ("1/2", "2/2") and CD_TRACK_NUMBER ("01/10", "02/10") tags
+    assertEquals(
+      2 to 1,
+      org.anmon.data.MusicRepository.parseDiscAndTrackNumbers(
+        rawTrackColumn = 1,
+        cdTrackTag = "01/10",
+        discNumberTag = "2/2"
+      )
+    )
+
+    // 3. Verify folder/filename fallbacks ("Disc 2", "2-03 Song.flac")
+    assertEquals(
+      2 to 3,
+      org.anmon.data.MusicRepository.parseDiscAndTrackNumbers(
+        rawTrackColumn = 3,
+        filePathOrName = "/storage/emulated/0/Music/Album/Disc 2/03 - Track.mp3",
+        parentFolderName = "Disc 2"
+      )
+    )
+    assertEquals(
+      2 to 4,
+      org.anmon.data.MusicRepository.parseDiscAndTrackNumbers(
+        filePathOrName = "2-04 Song Title.flac"
+      )
+    )
+
+    // 4. Verify interleaved multi-disc tracks sort by discNumber first, then trackNumber
+    val interleavedTracks = listOf(
+      Track(id = "d1_t1", title = "D1 Track 1", album = "Double Album", discNumber = 1, trackNumber = 1, uri = "file:///1_1.mp3"),
+      Track(id = "d2_t1", title = "D2 Track 1", album = "Double Album", discNumber = 2, trackNumber = 1, uri = "file:///2_1.mp3"),
+      Track(id = "d1_t2", title = "D1 Track 2", album = "Double Album", discNumber = 1, trackNumber = 2, uri = "file:///1_2.mp3"),
+      Track(id = "d2_t2", title = "D2 Track 2", album = "Double Album", discNumber = 2, trackNumber = 2, uri = "file:///2_2.mp3")
+    )
+
+    val sorted = org.anmon.data.MusicRepository.sortAlbumTracks(interleavedTracks)
+    assertEquals(listOf("d1_t1", "d1_t2", "d2_t1", "d2_t2"), sorted.map { it.id })
+  }
 }
