@@ -51,6 +51,7 @@ import org.anmon.ui.screens.FavoritesScreen
 import org.anmon.ui.screens.FoldersScreen
 import org.anmon.ui.screens.PlaylistsScreen
 import org.anmon.ui.screens.SongsScreen
+import org.anmon.ui.screens.StatsScreen
 
 @Composable
 fun MainScreen(viewModel: MainViewModel = viewModel()) {
@@ -70,6 +71,7 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
     val favoriteTracks by viewModel.favoriteTracks.collectAsState()
     val includedFolders by viewModel.includedFolders.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
+    val listeningStats by viewModel.listeningStats.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     var trackForPlaylist by remember { mutableStateOf<Track?>(null) }
@@ -233,6 +235,14 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onQueueTrack = { viewModel.queueTrack(it) },
                         onToggleFavorite = { viewModel.toggleFavorite(it) },
                         onSubScreenActiveChanged = { isSubScreenActive = it }
+                    )
+                }
+                LibraryTab.STATS -> {
+                    StatsScreen(
+                        stats = listeningStats,
+                        allTracks = allTracks,
+                        onPlayTrackContext = { track, list, index -> viewModel.playTrack(track, list, index) },
+                        onResetStats = { viewModel.resetListeningStats() }
                     )
                 }
             }

@@ -42,6 +42,7 @@ class PlaybackManager(
 ) {
     private val TAG = "PlaybackManager"
     private val sessionPrefs = context.getSharedPreferences(SESSION_PREFS_NAME, Context.MODE_PRIVATE)
+    val listeningStatsManager = org.anmon.data.ListeningStatsManager.get(context)
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
     private var recoveryWakeLock: PowerManager.WakeLock? = null
@@ -74,6 +75,7 @@ class PlaybackManager(
     private var callRecoveryJob: Job? = null
     private var bluetoothReconnectJob: Job? = null
     private var lastPersistedTickMs: Long = 0L
+    private var lastStatsTickMs: Long = 0L
 
     // Interruption & auto-resume state tracking
     @Volatile
@@ -506,6 +508,14 @@ class PlaybackManager(
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 updateCurrentTrackFromPlayer()
+                if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
+                    _playbackState.value.currentTrack?.let { track ->
+                        listeningStatsManager.recordTrackPlay(
+                            track = track,
+                            forceCount = reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+                        )
+                    }
+                }
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -648,6 +658,7 @@ class PlaybackManager(
 
     private fun startProgressTicker() {
         progressJob?.cancel()
+        lastStatsTickMs = System.currentTimeMillis()
         progressJob = scope.launch(Dispatchers.Main) {
             while (isActive) {
                 val player = _exoPlayer
@@ -655,6 +666,13 @@ class PlaybackManager(
                     if (!wasPlayingOnExternalOutput && isExternalMediaOutputConnected()) {
                         wasPlayingOnExternalOutput = true
                     }
+                    val now = System.currentTimeMillis()
+                    val elapsedMs = (now - lastStatsTickMs).coerceIn(1L, 1_500L)
+                    lastStatsTickMs = now
+                    _playbackState.value.currentTrack?.let { currentTrack ->
+                        listeningStatsManager.recordListeningDuration(currentTrack, elapsedMs)
+                    }
+
                     val pos = player.currentPosition.coerceAtLeast(0L)
                     val dur = if (player.duration > 0L) player.duration else _playbackState.value.durationMs
                     updateState {
@@ -664,11 +682,12 @@ class PlaybackManager(
                             isPreloaded = player.hasNextMediaItem()
                         )
                     }
-                    val now = System.currentTimeMillis()
                     if (now - lastPersistedTickMs >= 2000L) {
                         lastPersistedTickMs = now
                         savePlaybackSession()
                     }
+                } else {
+                    lastStatsTickMs = System.currentTimeMillis()
                 }
                 delay(250)
             }
@@ -678,6 +697,7 @@ class PlaybackManager(
     private fun stopProgressTicker() {
         progressJob?.cancel()
         progressJob = null
+        listeningStatsManager.flushToDisk()
     }
 
     /**
@@ -709,6 +729,7 @@ class PlaybackManager(
         player.play()
 
         val currentTrack = tracks.getOrNull(safeIndex)
+        currentTrack?.let { listeningStatsManager.recordTrackPlay(it, forceCount = true) }
         updateState {
             it.copy(
                 queue = tracks,

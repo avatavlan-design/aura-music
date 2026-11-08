@@ -305,4 +305,66 @@ class ExampleRobolectricTest {
     val sorted = org.anmon.data.MusicRepository.sortAlbumTracks(interleavedTracks)
     assertEquals(listOf("d1_t1", "d1_t2", "d2_t1", "d2_t2"), sorted.map { it.id })
   }
+
+  @Test
+  fun `listeningStatsManager tracks play counts and listening time in hours minutes and seconds`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    org.anmon.data.ListeningStatsManager.resetForTesting(context)
+    val statsManager = org.anmon.data.ListeningStatsManager.get(context)
+
+    val track1 = Track(
+      id = "stat_t1",
+      title = "Starlight Reverie",
+      artist = "Astral Wave",
+      album = "Aura Odyssey",
+      genre = "Ambient Synth",
+      durationMs = 180_000L,
+      uri = "file:///music/starlight.wav"
+    )
+    val track2 = Track(
+      id = "stat_t2",
+      title = "Moonlight Rain",
+      artist = "The Velvet Collective",
+      album = "Midnight Lounge",
+      genre = "Lo-Fi Beats",
+      durationMs = 200_000L,
+      uri = "file:///music/moonlight.wav"
+    )
+
+    // Record plays and listening duration (1h 12m 34s total = 4,354,000 ms)
+    statsManager.recordTrackPlay(track1, forceCount = true)
+    statsManager.recordTrackPlay(track1, forceCount = true)
+    statsManager.recordTrackPlay(track2, forceCount = true)
+
+    statsManager.recordListeningDuration(track1, 3_600_000L + 600_000L + 14_000L, persistImmediately = true) // 1h 10m 14s
+    statsManager.recordListeningDuration(track2, 120_000L + 20_000L, persistImmediately = true) // 2m 20s
+
+    val snapshot = statsManager.statsState.value
+    assertEquals(3, snapshot.totalTrackPlays)
+    assertEquals(1L, snapshot.hoursPart)
+    assertEquals(12L, snapshot.minutesPart)
+    assertEquals(34L, snapshot.secondsPart)
+    assertEquals("1h 12m 34s", snapshot.formattedTotalTime)
+
+    // Top song should be Starlight Reverie (2 plays)
+    assertEquals(2, snapshot.songs.size)
+    assertEquals("Starlight Reverie", snapshot.songs[0].title)
+    assertEquals(2, snapshot.songs[0].playCount)
+    assertEquals("1h 10m 14s", snapshot.songs[0].formattedListeningTime)
+
+    // Top artist, album, and genre should also be ranked #1
+    assertEquals("Astral Wave", snapshot.artists[0].title)
+    assertEquals(2, snapshot.artists[0].playCount)
+    assertEquals("Aura Odyssey", snapshot.albums[0].title)
+    assertEquals(2, snapshot.albums[0].playCount)
+    assertEquals("Ambient Synth", snapshot.genres[0].title)
+    assertEquals(2, snapshot.genres[0].playCount)
+
+    // Resetting clears all counters
+    statsManager.resetStats()
+    val cleared = statsManager.statsState.value
+    assertEquals(0, cleared.totalTrackPlays)
+    assertEquals(0L, cleared.totalListeningTimeMs)
+    assertEquals(0, cleared.songs.size)
+  }
 }

@@ -166,6 +166,7 @@ class MusicRepository(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             baseProjection.add(MediaStore.Audio.Media.DISC_NUMBER)
             baseProjection.add(MediaStore.Audio.Media.CD_TRACK_NUMBER)
+            baseProjection.add(MediaStore.Audio.Media.GENRE)
         }
         val projection = baseProjection.toTypedArray()
 
@@ -195,6 +196,9 @@ class MusicRepository(
             val cdTrackCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 cursor.getColumnIndex(MediaStore.Audio.Media.CD_TRACK_NUMBER)
             } else -1
+            val genreCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                cursor.getColumnIndex(MediaStore.Audio.Media.GENRE)
+            } else -1
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
@@ -206,6 +210,12 @@ class MusicRepository(
                 val rawTrack = cursor.getInt(trackCol)
                 val discTag = if (discCol >= 0) cursor.getString(discCol) else null
                 val cdTrackTag = if (cdTrackCol >= 0) cursor.getString(cdTrackCol) else null
+                val rawGenre = if (genreCol >= 0) cursor.getString(genreCol) else null
+                val genre = if (rawGenre.isNullOrBlank() || rawGenre.contains("<unknown>", ignoreCase = true)) {
+                    "General"
+                } else {
+                    rawGenre.trim()
+                }
                 val mimeType = cursor.getString(mimeCol) ?: "audio/mpeg"
                 val path = cursor.getString(dataCol)
                 val dateAdded = cursor.getLong(dateCol) * 1000
@@ -235,6 +245,7 @@ class MusicRepository(
                         title = title,
                         artist = if (artist.contains("<unknown>")) "Unknown Artist" else artist,
                         album = if (album.contains("<unknown>")) "Unknown Album" else album,
+                        genre = genre,
                         trackNumber = trackNum,
                         discNumber = discNum,
                         durationMs = duration,
@@ -273,6 +284,7 @@ class MusicRepository(
                     var title = name.substringBeforeLast('.')
                     var artist = "Unknown Artist"
                     var album = rootFolderName
+                    var genre = "General"
                     var durationMs = 0L
                     var cdTrackTag: String? = null
                     var discTag: String? = null
@@ -284,6 +296,7 @@ class MusicRepository(
                         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() }?.let { title = it }
                         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)?.takeIf { it.isNotBlank() }?.let { artist = it }
                         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)?.takeIf { it.isNotBlank() }?.let { album = it }
+                        retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE)?.takeIf { it.isNotBlank() && !it.contains("<unknown>", ignoreCase = true) }?.let { genre = it.trim() }
                         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { durationMs = it }
                         cdTrackTag = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER)
                         discTag = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER)
@@ -311,6 +324,7 @@ class MusicRepository(
                             title = title,
                             artist = artist,
                             album = album,
+                            genre = genre,
                             trackNumber = trackNum,
                             discNumber = discNum,
                             durationMs = durationMs,

@@ -63,6 +63,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val favoriteTracks = repository.favoriteTracks
     val includedFolders = repository.includedFolders
     val isScanning = repository.isScanning
+    val listeningStatsManager = org.anmon.data.ListeningStatsManager.get(application)
+    val listeningStats: StateFlow<org.anmon.data.ListeningStatsSnapshot> = listeningStatsManager.statsState
 
     // Filtered tracks when search query is entered
     val filteredTracks: StateFlow<List<Track>> = combine(allTracks, _searchQuery) { tracks, query ->
@@ -187,5 +189,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deletePlaylist(playlistId: String) {
         repository.deletePlaylist(playlistId)
         _snackbarMessage.value = "Playlist removed"
+    }
+
+    fun resetListeningStats() {
+        listeningStatsManager.resetStats()
+        _snackbarMessage.value = "Listening stats reset"
     }
 }

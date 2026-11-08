@@ -91,7 +91,8 @@ enum class LibraryTab(val displayName: String) {
     ARTISTS("Artists"),
     PLAYLISTS("Playlists"),
     FAVORITES("Favorites"),
-    FOLDERS("Folders")
+    FOLDERS("Folders"),
+    STATS("Stats")
 }
 
 enum class RepeatMode {
