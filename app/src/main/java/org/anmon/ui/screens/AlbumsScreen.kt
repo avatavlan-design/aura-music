@@ -7,7 +7,6 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,15 +24,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.AlertDialog
@@ -51,12 +49,11 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -64,10 +61,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import org.anmon.model.Album
 import org.anmon.model.Track
 import org.anmon.ui.components.AlbumArtwork
+import org.anmon.ui.components.LazyGridAlphabetFastScroller
 import org.anmon.ui.components.SwipeToQueueTrackItem
 import kotlin.random.Random
 
@@ -81,6 +78,7 @@ fun AlbumsScreen(
     onToggleFavorite: (String) -> Unit,
     onAddToPlaylist: (Track) -> Unit,
     onSubScreenActiveChanged: (Boolean) -> Unit = {},
+    gridState: LazyGridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() },
     modifier: Modifier = Modifier
 ) {
     var selectedAlbum by remember { mutableStateOf<Album?>(null) }
@@ -125,6 +123,7 @@ fun AlbumsScreen(
     } else {
         AlbumGridView(
             albums = albums,
+            gridState = gridState,
             onAlbumClick = { selectedAlbum = it },
             onOpenRandomPicker = {
                 refreshRandomSelection()
@@ -156,6 +155,7 @@ fun AlbumGridView(
     albums: List<Album>,
     onAlbumClick: (Album) -> Unit,
     onOpenRandomPicker: () -> Unit,
+    gridState: LazyGridState = rememberLazyGridState(),
     modifier: Modifier = Modifier
 ) {
     if (albums.isEmpty()) {
@@ -163,8 +163,7 @@ fun AlbumGridView(
         return
     }
 
-    val gridState = rememberLazyGridState()
-    var isButtonVisible by remember { mutableStateOf(true) }
+    var isButtonVisible by rememberSaveable { mutableStateOf(true) }
 
     // Scroll listener: scroll down hides button, scroll up reveals it
     val nestedScrollConnection = remember {
@@ -184,7 +183,7 @@ fun AlbumGridView(
     }
 
     // When scrolled to the very top, always ensure the button is visible
-    val isAtTop by remember {
+    val isAtTop by remember(gridState) {
         derivedStateOf {
             gridState.firstVisibleItemIndex == 0 && gridState.firstVisibleItemScrollOffset == 0
         }
@@ -253,17 +252,25 @@ fun AlbumGridView(
             }
         }
 
-        LazyVerticalGrid(
-            state = gridState,
-            columns = GridCells.Adaptive(minSize = 150.dp),
-            contentPadding = PaddingValues(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            items(albums, key = { it.id }) { album ->
-                AlbumCard(album = album, onClick = { onAlbumClick(album) })
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyVerticalGrid(
+                state = gridState,
+                columns = GridCells.Adaptive(minSize = 150.dp),
+                contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 24.dp, bottom = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(albums, key = { it.id }) { album ->
+                    AlbumCard(album = album, onClick = { onAlbumClick(album) })
+                }
             }
+
+            LazyGridAlphabetFastScroller(
+                gridState = gridState,
+                items = albums,
+                labelSelector = { it.title }
+            )
         }
     }
 }

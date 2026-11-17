@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,6 +28,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,6 +38,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.anmon.model.Track
+import org.anmon.ui.components.LazyListAlphabetFastScroller
 import org.anmon.ui.components.SwipeToQueueTrackItem
 
 @Composable
@@ -47,6 +50,7 @@ fun FavoritesScreen(
     onQueueTrack: (Track) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onAddToPlaylist: (Track) -> Unit,
+    listState: LazyListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
     modifier: Modifier = Modifier
 ) {
     if (favoriteTracks.isEmpty()) {
@@ -137,27 +141,34 @@ fun FavoritesScreen(
             }
         }
 
-        val listState = androidx.compose.foundation.lazy.rememberLazyListState()
         val isSwipeEnabled = org.anmon.ui.components.rememberScrollCooldown(listState)
 
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            itemsIndexed(favoriteTracks, key = { _, track -> track.id }) { index, track ->
-                SwipeToQueueTrackItem(
-                    track = track,
-                    isPlaying = isPlaying,
-                    isCurrentTrack = track.id == currentTrackId,
-                    onTrackClick = { onTrackClick(track, favoriteTracks, index) },
-                    onQueue = onQueueTrack,
-                    onToggleFavorite = onToggleFavorite,
-                    onAddToPlaylistClick = { onAddToPlaylist(track) },
-                    isSwipeEnabled = isSwipeEnabled
-                )
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 24.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                itemsIndexed(favoriteTracks, key = { _, track -> track.id }) { index, track ->
+                    SwipeToQueueTrackItem(
+                        track = track,
+                        isPlaying = isPlaying,
+                        isCurrentTrack = track.id == currentTrackId,
+                        onTrackClick = { onTrackClick(track, favoriteTracks, index) },
+                        onQueue = onQueueTrack,
+                        onToggleFavorite = onToggleFavorite,
+                        onAddToPlaylistClick = { onAddToPlaylist(track) },
+                        isSwipeEnabled = isSwipeEnabled
+                    )
+                }
             }
+
+            LazyListAlphabetFastScroller(
+                listState = listState,
+                items = favoriteTracks,
+                labelSelector = { it.title }
+            )
         }
     }
 }

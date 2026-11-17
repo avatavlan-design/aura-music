@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -22,7 +23,6 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.anmon.model.SortOption
 import org.anmon.model.Track
+import org.anmon.ui.components.LazyListAlphabetFastScroller
 import org.anmon.ui.components.SwipeToQueueTrackItem
 
 @Composable
@@ -56,9 +58,10 @@ fun SongsScreen(
     onAddToPlaylist: (Track) -> Unit,
     onPlayAll: (List<Track>) -> Unit,
     onShuffleAll: (List<Track>) -> Unit,
+    listState: LazyListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() },
     modifier: Modifier = Modifier
 ) {
-    var selectedSort by remember { mutableStateOf(SortOption.TITLE) }
+    var selectedSort by rememberSaveable { mutableStateOf(SortOption.TITLE) }
     var sortMenuExpanded by remember { mutableStateOf(false) }
 
     val sortedTracks = remember(tracks, selectedSort) {
@@ -178,28 +181,41 @@ fun SongsScreen(
             )
         }
 
-        val listState = androidx.compose.foundation.lazy.rememberLazyListState()
         val isSwipeEnabled = org.anmon.ui.components.rememberScrollCooldown(listState)
 
-        // Track List
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            itemsIndexed(sortedTracks, key = { _, track -> track.id }) { index, track ->
-                SwipeToQueueTrackItem(
-                    track = track,
-                    isPlaying = isPlaying,
-                    isCurrentTrack = track.id == currentTrackId,
-                    onTrackClick = { onTrackClick(track, sortedTracks, index) },
-                    onQueue = onQueueTrack,
-                    onToggleFavorite = onToggleFavorite,
-                    onAddToPlaylistClick = { onAddToPlaylist(track) },
-                    isSwipeEnabled = isSwipeEnabled
-                )
+        // Track List + Right-Edge Alphabet Fast Scroller
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 24.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                itemsIndexed(sortedTracks, key = { _, track -> track.id }) { index, track ->
+                    SwipeToQueueTrackItem(
+                        track = track,
+                        isPlaying = isPlaying,
+                        isCurrentTrack = track.id == currentTrackId,
+                        onTrackClick = { onTrackClick(track, sortedTracks, index) },
+                        onQueue = onQueueTrack,
+                        onToggleFavorite = onToggleFavorite,
+                        onAddToPlaylistClick = { onAddToPlaylist(track) },
+                        isSwipeEnabled = isSwipeEnabled
+                    )
+                }
             }
+
+            LazyListAlphabetFastScroller(
+                listState = listState,
+                items = sortedTracks,
+                labelSelector = { track ->
+                    when (selectedSort) {
+                        SortOption.ARTIST -> track.artist
+                        SortOption.ALBUM -> track.album
+                        else -> track.title
+                    }
+                }
+            )
         }
     }
 }

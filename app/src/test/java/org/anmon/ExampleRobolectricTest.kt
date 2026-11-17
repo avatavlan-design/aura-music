@@ -367,4 +367,19 @@ class ExampleRobolectricTest {
     assertEquals(0L, cleared.totalListeningTimeMs)
     assertEquals(0, cleared.songs.size)
   }
+
+  @Test
+  fun `fastScrollHelper maps scroll fraction to target item index and alphabet initial`() {
+    val albums = listOf(
+      Album(id = "1", title = "1989", artist = "Artist", trackCount = 1, totalDurationMs = 1000L),
+      Album(id = "2", title = "Aura Odyssey", artist = "Artist", trackCount = 1, totalDurationMs = 1000L),
+      Album(id = "3", title = "Midnight Lounge", artist = "Artist", trackCount = 1, totalDurationMs = 1000L),
+      Album(id = "4", title = "Zenith", artist = "Artist", trackCount = 1, totalDurationMs = 1000L)
+    )
+
+    assertEquals(0 to "#", org.anmon.ui.components.FastScrollHelper.computeFastScrollTarget(0f, albums) { it.title })
+    assertEquals(1 to "A", org.anmon.ui.components.FastScrollHelper.computeFastScrollTarget(0.33f, albums) { it.title })
+    assertEquals(2 to "M", org.anmon.ui.components.FastScrollHelper.computeFastScrollTarget(0.67f, albums) { it.title })
+    assertEquals(3 to "Z", org.anmon.ui.components.FastScrollHelper.computeFastScrollTarget(1f, albums) { it.title })
+  }
 }
