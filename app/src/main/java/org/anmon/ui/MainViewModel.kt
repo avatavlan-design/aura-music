@@ -159,8 +159,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addIncludedFolder(folderUri: String) {
-        repository.addIncludedFolder(folderUri)
-        _snackbarMessage.value = "Folder added. Scanning audio files..."
+        viewModelScope.launch {
+            _snackbarMessage.value = "Folder added. Scanning audio files..."
+            val totalCount = repository.addIncludedFolderAndScan(folderUri)
+            _snackbarMessage.value = "Folder scanned ($totalCount tracks in library)"
+        }
     }
 
     fun removeIncludedFolder(folderUri: String) {
@@ -170,8 +173,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rescanLibrary() {
         viewModelScope.launch {
+            _snackbarMessage.value = "Scanning library for audio files..."
             repository.rescanLibrary()
-            _snackbarMessage.value = "Library refreshed"
+            _snackbarMessage.value = "Library refreshed (${repository.tracks.value.size} tracks)"
         }
     }
 

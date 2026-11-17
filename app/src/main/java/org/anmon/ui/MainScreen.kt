@@ -243,7 +243,8 @@ fun MainScreen(viewModel: MainViewModel = viewModel()) {
                         onTrackClick = { track, list, index -> viewModel.playTrack(track, list, index) },
                         onQueueTrack = { viewModel.queueTrack(it) },
                         onToggleFavorite = { viewModel.toggleFavorite(it) },
-                        onSubScreenActiveChanged = { isSubScreenActive = it }
+                        onSubScreenActiveChanged = { isSubScreenActive = it },
+                        isScanning = isScanning
                     )
                 }
                 LibraryTab.STATS -> {

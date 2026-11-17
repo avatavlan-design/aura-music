@@ -382,4 +382,82 @@ class ExampleRobolectricTest {
     assertEquals(2 to "M", org.anmon.ui.components.FastScrollHelper.computeFastScrollTarget(0.67f, albums) { it.title })
     assertEquals(3 to "Z", org.anmon.ui.components.FastScrollHelper.computeFastScrollTarget(1f, albums) { it.title })
   }
+
+  @Test
+  fun `folder scanning preserves all tracks with null filePath and discovers nested folder audio files`() {
+    // 1. Verify tracks with filePath == null from SAF scanning are never dropped by null == null comparison
+    val existingMediaTrackWithNullPath = Track(
+      id = "media_1",
+      title = "Scoped Storage Song",
+      artist = "Artist 1",
+      album = "Album 1",
+      durationMs = 180_000L,
+      uri = "content://media/external/audio/media/1",
+      filePath = null,
+      folderPath = "Device Music"
+    )
+    val safFolderTracks = listOf(
+      Track(
+        id = "folder_101",
+        title = "Folder Track One",
+        artist = "Folder Artist",
+        album = "Folder Album",
+        durationMs = 200_000L,
+        uri = "content://com.android.externalstorage.documents/tree/primary%3AMusic/document/primary%3AMusic%2F01.mp3",
+        filePath = null,
+        folderPath = "Music"
+      ),
+      Track(
+        id = "folder_102",
+        title = "Folder Track Two",
+        artist = "Folder Artist",
+        album = "Folder Album",
+        durationMs = 210_000L,
+        uri = "content://com.android.externalstorage.documents/tree/primary%3AMusic/document/primary%3AMusic%2F02.mp3",
+        filePath = null,
+        folderPath = "Music"
+      ),
+      Track(
+        id = "folder_103",
+        title = "Folder Track Three",
+        artist = "Folder Artist",
+        album = "Folder Album",
+        durationMs = 220_000L,
+        uri = "content://com.android.externalstorage.documents/tree/primary%3AMusic/document/primary%3AMusic%2F03.flac",
+        filePath = null,
+        folderPath = "Music"
+      )
+    )
+
+    val merged = org.anmon.data.MusicRepository.mergeTracksDeduplicated(
+      baseTracks = listOf(existingMediaTrackWithNullPath),
+      incomingTracks = safFolderTracks,
+      preferIncomingFolderPath = true
+    )
+    assertEquals(4, merged.size)
+    assertEquals(3, merged.count { it.folderPath == "Music" })
+
+    // 2. Verify end-to-end folder scanning discovers multiple audio files across subfolders
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val tempMusicRoot = java.io.File(context.cacheDir, "user_selected_music_folder").apply {
+      deleteRecursively()
+      mkdirs()
+    }
+    val subDir = java.io.File(tempMusicRoot, "Disc 1").apply { mkdirs() }
+    java.io.File(tempMusicRoot, "01 - Opening Theme.mp3").writeBytes(ByteArray(256))
+    java.io.File(tempMusicRoot, "02 - Second Movement.flac").writeBytes(ByteArray(256))
+    java.io.File(subDir, "03 - Bonus Track.ogg").writeBytes(ByteArray(256))
+
+    val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+    val repo = org.anmon.data.MusicRepository(context, scope)
+    kotlinx.coroutines.runBlocking {
+      repo.addIncludedFolderAndScan(android.net.Uri.fromFile(tempMusicRoot).toString())
+    }
+
+    val folderDiscovered = repo.tracks.value.filter { it.folderPath == "user_selected_music_folder" }
+    assertEquals(3, folderDiscovered.size)
+    org.junit.Assert.assertTrue(folderDiscovered.any { it.title == "Opening Theme" })
+    org.junit.Assert.assertTrue(folderDiscovered.any { it.title == "Second Movement" })
+    org.junit.Assert.assertTrue(folderDiscovered.any { it.title == "Bonus Track" })
+  }
 }

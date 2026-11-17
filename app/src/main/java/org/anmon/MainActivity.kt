@@ -30,7 +30,11 @@ class MainActivity : ComponentActivity() {
             // Request runtime permissions gracefully for audio reading
             val permissionLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestMultiplePermissions()
-            ) { /* Permissions handled gracefully; library will rescan */ }
+            ) { permissions ->
+                if (permissions.values.any { it }) {
+                    mainViewModel.rescanLibrary()
+                }
+            }
 
             LaunchedEffect(Unit) {
                 val permissionsToRequest = mutableListOf<String>()
