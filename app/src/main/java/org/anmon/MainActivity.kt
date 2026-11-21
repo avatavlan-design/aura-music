@@ -27,24 +27,35 @@ class MainActivity : ComponentActivity() {
             val mainViewModel: MainViewModel = viewModel()
             val currentTheme by mainViewModel.currentTheme.collectAsState()
 
-            // Request runtime permissions gracefully for audio reading
+            // Request runtime permissions gracefully only when not already granted
             val permissionLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestMultiplePermissions()
             ) { permissions ->
-                if (permissions.values.any { it }) {
-                    mainViewModel.rescanLibrary()
+                val audioGranted = permissions[Manifest.permission.READ_MEDIA_AUDIO] == true ||
+                    permissions[Manifest.permission.READ_EXTERNAL_STORAGE] == true
+                if (audioGranted) {
+                    mainViewModel.onPermissionsUpdated()
                 }
             }
 
             LaunchedEffect(Unit) {
-                val permissionsToRequest = mutableListOf<String>()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    permissionsToRequest.add(Manifest.permission.READ_MEDIA_AUDIO)
-                    permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+                val candidatePermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    listOf(
+                        Manifest.permission.READ_MEDIA_AUDIO,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    )
                 } else {
-                    permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                    listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
                 }
-                permissionLauncher.launch(permissionsToRequest.toTypedArray())
+                val missingPermissions = candidatePermissions.filter { perm ->
+                    androidx.core.content.ContextCompat.checkSelfPermission(
+                        this@MainActivity,
+                        perm
+                    ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                }
+                if (missingPermissions.isNotEmpty()) {
+                    permissionLauncher.launch(missingPermissions.toTypedArray())
+                }
 
                 try {
                     val serviceIntent = android.content.Intent(this@MainActivity, org.anmon.playback.MediaPlaybackService::class.java)
@@ -68,6 +79,9 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         try {
             org.anmon.playback.PlaybackManagerProvider.get(this).savePlaybackSession()
+        } catch (_: Exception) {}
+        try {
+            org.anmon.data.MusicRepositoryProvider.get(this).flushCacheNow()
         } catch (_: Exception) {}
         super.onStop()
     }

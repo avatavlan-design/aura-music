@@ -459,5 +459,59 @@ class ExampleRobolectricTest {
     org.junit.Assert.assertTrue(folderDiscovered.any { it.title == "Opening Theme" })
     org.junit.Assert.assertTrue(folderDiscovered.any { it.title == "Second Movement" })
     org.junit.Assert.assertTrue(folderDiscovered.any { it.title == "Bonus Track" })
+
+    // 3. Simulate closing and reopening the app (new MusicRepository instance) with no changes on disk:
+    //    Tracks must be immediately loaded from persistent cache and no full rescan should occur
+    val repoAfterRestart = org.anmon.data.MusicRepository(context, scope)
+    val cachedFolderTracks = repoAfterRestart.tracks.value.filter { it.folderPath == "user_selected_music_folder" }
+    assertEquals(3, cachedFolderTracks.size)
+    assertEquals(0, repoAfterRestart.fullScanCount.get())
+
+    val rescanTriggeredWhenUnchanged = kotlinx.coroutines.runBlocking {
+      repoAfterRestart.ensureLibraryUpToDate()
+    }
+    org.junit.Assert.assertFalse(rescanTriggeredWhenUnchanged)
+    assertEquals(0, repoAfterRestart.fullScanCount.get())
+
+    // 4. Add a new audio file on disk -> ensureLibraryUpToDate() detects the disk change and rescans
+    java.io.File(tempMusicRoot, "04 - New Encore.mp3").writeBytes(ByteArray(512))
+    val rescanTriggeredAfterDiskChange = kotlinx.coroutines.runBlocking {
+      repoAfterRestart.ensureLibraryUpToDate()
+    }
+    org.junit.Assert.assertTrue(rescanTriggeredAfterDiskChange)
+    val updatedFolderTracks = repoAfterRestart.tracks.value.filter { it.folderPath == "user_selected_music_folder" }
+    assertEquals(4, updatedFolderTracks.size)
+    org.junit.Assert.assertTrue(updatedFolderTracks.any { it.title == "New Encore" })
+
+    // 5. Simulate killing the app while tag extraction was incomplete (tagsComplete = false in cache):
+    //    On cold restart, all 4 tracks must load immediately without wiping or triggering a full rescan
+    val cacheFile = java.io.File(context.filesDir, "aura_library_cache_v1.json")
+    val cacheJson = org.json.JSONObject(cacheFile.readText())
+    cacheJson.put("tagsComplete", false)
+    cacheFile.writeText(cacheJson.toString())
+
+    val repoAfterInterruptedScan = org.anmon.data.MusicRepository(context, scope)
+    val immediatelyRestored = repoAfterInterruptedScan.tracks.value.filter { it.folderPath == "user_selected_music_folder" }
+    assertEquals(4, immediatelyRestored.size)
+    assertEquals(0, repoAfterInterruptedScan.fullScanCount.get())
+
+    // 6. Verify commutative order-independent hash mixing produces identical checksums regardless of traversal order
+    val entries = listOf(101L, 202L, 303L, 404L, 505L)
+    var xorForward = 0L
+    var sumForward = 0L
+    for (e in entries) {
+      val h = org.anmon.data.LibraryCacheStore.mix64(e)
+      xorForward = xorForward xor h
+      sumForward += h
+    }
+    var xorReversed = 0L
+    var sumReversed = 0L
+    for (e in entries.reversed()) {
+      val h = org.anmon.data.LibraryCacheStore.mix64(e)
+      xorReversed = xorReversed xor h
+      sumReversed += h
+    }
+    assertEquals(xorForward, xorReversed)
+    assertEquals(sumForward, sumReversed)
   }
 }

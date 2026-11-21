@@ -1,7 +1,9 @@
 package org.anmon.data
 
+import android.Manifest
 import android.content.ContentUris
 import android.content.Context
+import android.content.pm.PackageManager
 import android.database.Cursor
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -11,9 +13,13 @@ import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -23,7 +29,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.anmon.model.Album
@@ -35,36 +43,37 @@ import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class MusicRepository(
     private val context: Context,
     private val scope: CoroutineScope
 ) {
     private val prefs = context.getSharedPreferences("aura_music_prefs", Context.MODE_PRIVATE)
+    private val cacheStore = LibraryCacheStore(context)
+
     private val scanMutex = Mutex()
     private val pendingRescanRequest = AtomicBoolean(false)
 
-    private data class CachedTagMetadata(
-        val title: String?,
-        val artist: String?,
-        val album: String?,
-        val genre: String?,
-        val durationMs: Long?,
-        val cdTrackTag: String?,
-        val discTag: String?,
-        val mimeType: String?
-    )
+    /** Counter incremented every time a full library scan runs (useful for verifying cache hits). */
+    val fullScanCount = AtomicInteger(0)
+
+    @Volatile
+    private var lastKnownFingerprint: String = ""
+
+    @Volatile
+    private var lastKnownTagsComplete: Boolean = false
 
     private val metadataCache = ConcurrentHashMap<String, CachedTagMetadata>()
 
-    private val _tracks = MutableStateFlow<List<Track>>(emptyList())
-    val tracks: StateFlow<List<Track>> = _tracks.asStateFlow()
+    private val _favorites = MutableStateFlow<Set<String>>(loadFavorites())
+    val favorites: StateFlow<Set<String>> = _favorites.asStateFlow()
 
     private val _includedFolders = MutableStateFlow<List<String>>(loadIncludedFolders())
     val includedFolders: StateFlow<List<String>> = _includedFolders.asStateFlow()
 
-    private val _favorites = MutableStateFlow<Set<String>>(loadFavorites())
-    val favorites: StateFlow<Set<String>> = _favorites.asStateFlow()
+    private val _tracks = MutableStateFlow<List<Track>>(emptyList())
+    val tracks: StateFlow<List<Track>> = _tracks.asStateFlow()
 
     private val _userPlaylists = MutableStateFlow<List<Playlist>>(loadPlaylists())
     private val _m3uPlaylists = MutableStateFlow<List<Playlist>>(emptyList())
@@ -131,8 +140,193 @@ class MusicRepository(
     }.stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     init {
+        // 1. Immediately hydrate cached ID3 tags, folders, tracks & playlists synchronously on launch
+        cacheStore.loadTagCache(metadataCache)
+        val cachedSnapshot = cacheStore.loadLibraryCache(_favorites.value)
+        if (cachedSnapshot != null) {
+            if (_includedFolders.value.isEmpty() && cachedSnapshot.includedFolders.isNotEmpty()) {
+                _includedFolders.value = cachedSnapshot.includedFolders
+                saveIncludedFolders(cachedSnapshot.includedFolders)
+            }
+            lastKnownFingerprint = cachedSnapshot.fingerprint
+            lastKnownTagsComplete = cachedSnapshot.tagsComplete
+            if (cachedSnapshot.tracks.isNotEmpty()) {
+                publishTracks(cachedSnapshot.tracks)
+            }
+            if (cachedSnapshot.m3uPlaylists.isNotEmpty()) {
+                _m3uPlaylists.value = cachedSnapshot.m3uPlaylists
+            }
+        }
+
+        // 2. In background, verify if disk or folder list changed; only rescan if needed
         scope.launch {
+            ensureLibraryUpToDate()
+        }
+    }
+
+    /**
+     * Synchronously flushes current tracks, included folders, and extracted tags to disk.
+     * Invoked from Activity.onStop() so killing the app never loses scanned tracks or progress.
+     */
+    fun flushCacheNow() {
+        val currentTracks = _tracks.value
+        if (currentTracks.isEmpty()) return
+        try {
+            if (metadataCache.isNotEmpty()) {
+                cacheStore.saveTagCache(metadataCache)
+            }
+            cacheStore.saveLibraryCache(
+                fingerprint = lastKnownFingerprint,
+                tagsComplete = lastKnownTagsComplete,
+                includedFolders = _includedFolders.value,
+                tracks = currentTracks,
+                m3uPlaylists = _m3uPlaylists.value
+            )
+        } catch (t: Throwable) {
+            Log.w("MusicRepository", "Failed flushing library cache", t)
+        }
+    }
+
+    /**
+     * Checks whether the cached library matches the current disk & folder fingerprint.
+     * Only triggers a full rescan if no cache exists, folders changed, or files on disk changed.
+     * Returns `true` if a full rescan was performed, or `false` if the cached library was reused.
+     */
+    suspend fun ensureLibraryUpToDate(): Boolean = withContext(Dispatchers.IO) {
+        val cached = cacheStore.loadLibraryCache(_favorites.value)
+        if (cached == null || cached.tracks.isEmpty()) {
             rescanLibrary()
+            return@withContext true
+        }
+
+        // Ensure _tracks is populated with the cached tracks immediately
+        if (_tracks.value.isEmpty()) {
+            publishTracks(cached.tracks)
+            if (cached.m3uPlaylists.isNotEmpty()) {
+                _m3uPlaylists.value = cached.m3uPlaylists
+            }
+        }
+
+        val currentFingerprint = computeStorageFingerprint()
+        if (cached.fingerprint.isNotBlank() && cached.fingerprint == currentFingerprint) {
+            lastKnownFingerprint = currentFingerprint
+            lastKnownTagsComplete = cached.tagsComplete
+            // Ensure built-in sample WAV files exist on disk without rescanning
+            try {
+                SampleAudioGenerator.ensureSampleTracks(context)
+            } catch (_: Throwable) {}
+
+            // If a previous scan was interrupted mid-ID3-tag extraction, quietly refine remaining tags
+            // without wiping cached tracks or re-traversing folders.
+            if (!cached.tagsComplete) {
+                resumePendingTagExtraction(currentFingerprint)
+            }
+            return@withContext false
+        }
+
+        rescanLibrary()
+        return@withContext true
+    }
+
+    private suspend fun resumePendingTagExtraction(fingerprint: String) = withContext(Dispatchers.IO) {
+        if (!scanMutex.tryLock()) return@withContext
+        try {
+            val workingTracks = _tracks.value.toMutableList()
+            val pendingIndices = workingTracks.indices.filter { idx ->
+                val t = workingTracks[idx]
+                t.id.startsWith("folder_") && !metadataCache.containsKey(t.uri)
+            }
+            if (pendingIndices.isEmpty()) {
+                lastKnownTagsComplete = true
+                lastKnownFingerprint = fingerprint
+                cacheStore.saveLibraryCache(
+                    fingerprint = fingerprint,
+                    tagsComplete = true,
+                    includedFolders = _includedFolders.value,
+                    tracks = _tracks.value,
+                    m3uPlaylists = _m3uPlaylists.value
+                )
+                return@withContext
+            }
+
+            _isScanning.value = true
+            val semaphore = Semaphore(4)
+            var processed = 0
+            for (chunk in pendingIndices.chunked(24)) {
+                val results = coroutineScope {
+                    chunk.map { idx ->
+                        async(Dispatchers.IO) {
+                            semaphore.withPermit {
+                                val track = workingTracks[idx]
+                                idx to extractMetadataSafely(Uri.parse(track.uri))
+                            }
+                        }
+                    }.awaitAll()
+                }
+                var anyUpdated = false
+                for ((idx, extracted) in results) {
+                    val track = workingTracks[idx]
+                    val resolvedMeta = extracted ?: CachedTagMetadata(
+                        title = track.title,
+                        artist = track.artist,
+                        album = track.album,
+                        genre = track.genre,
+                        durationMs = track.durationMs,
+                        cdTrackTag = null,
+                        discTag = null,
+                        mimeType = track.mimeType
+                    )
+                    metadataCache[track.uri] = resolvedMeta
+                    if (extracted != null) {
+                        val (discNum, trackNum) = parseDiscAndTrackNumbers(
+                            rawTrackColumn = null,
+                            cdTrackTag = extracted.cdTrackTag,
+                            discNumberTag = extracted.discTag,
+                            filePathOrName = track.filePath ?: track.title,
+                            parentFolderName = track.folderPath
+                        )
+                        workingTracks[idx] = track.copy(
+                            title = extracted.title?.takeIf { it.isNotBlank() } ?: track.title,
+                            artist = extracted.artist?.takeIf { it.isNotBlank() && !it.contains("<unknown>", ignoreCase = true) } ?: track.artist,
+                            album = extracted.album?.takeIf { it.isNotBlank() && !it.contains("<unknown>", ignoreCase = true) } ?: track.album,
+                            genre = extracted.genre?.takeIf { it.isNotBlank() && !it.contains("<unknown>", ignoreCase = true) } ?: track.genre,
+                            durationMs = extracted.durationMs ?: track.durationMs,
+                            mimeType = extracted.mimeType?.takeIf { it.isNotBlank() } ?: track.mimeType,
+                            discNumber = discNum,
+                            trackNumber = trackNum
+                        )
+                        anyUpdated = true
+                    }
+                    processed++
+                }
+                if (anyUpdated) {
+                    publishTracks(workingTracks)
+                }
+                cacheStore.saveTagCache(metadataCache)
+                cacheStore.saveLibraryCache(
+                    fingerprint = fingerprint,
+                    tagsComplete = processed >= pendingIndices.size,
+                    includedFolders = _includedFolders.value,
+                    tracks = _tracks.value,
+                    m3uPlaylists = _m3uPlaylists.value
+                )
+            }
+
+            lastKnownFingerprint = fingerprint
+            lastKnownTagsComplete = true
+            cacheStore.saveTagCache(metadataCache)
+            cacheStore.saveLibraryCache(
+                fingerprint = fingerprint,
+                tagsComplete = true,
+                includedFolders = _includedFolders.value,
+                tracks = _tracks.value,
+                m3uPlaylists = _m3uPlaylists.value
+            )
+        } catch (t: Throwable) {
+            Log.w("MusicRepository", "Error resuming tag extraction", t)
+        } finally {
+            _isScanning.value = false
+            scanMutex.unlock()
         }
     }
 
@@ -183,6 +377,35 @@ class MusicRepository(
     }
 
     private suspend fun performRescanInternal() {
+        fullScanCount.incrementAndGet()
+        val foldersSnapshot = _includedFolders.value.toList()
+        val scanFingerprint = computeStorageFingerprint()
+        lastKnownFingerprint = scanFingerprint
+        lastKnownTagsComplete = false
+
+        // Keep existing cached tracks from not-yet-scanned included folders visible while rescanning
+        // so the UI NEVER collapses down to only the 4 sample tracks mid-scan.
+        val existingTracksSnapshot = _tracks.value
+        val remainingFolderNames = foldersSnapshot
+            .map { resolveFolderDisplayName(context, it) }
+            .toMutableSet()
+
+        fun buildNonDestructiveDisplayList(currentFound: List<Track>): List<Track> {
+            if (remainingFolderNames.isEmpty() || existingTracksSnapshot.isEmpty()) {
+                return currentFound
+            }
+            val preservedTracks = existingTracksSnapshot.filter { remainingFolderNames.contains(it.folderPath) }
+            return if (preservedTracks.isEmpty()) {
+                currentFound
+            } else {
+                mergeTracksDeduplicated(
+                    baseTracks = currentFound,
+                    incomingTracks = preservedTracks,
+                    preferIncomingFolderPath = false
+                )
+            }
+        }
+
         var allFound = mutableListOf<Track>()
 
         // 1. Ensure sample tracks are always loaded for instant offline playback
@@ -210,34 +433,57 @@ class MusicRepository(
                 incomingTracks = mediaStoreTracks,
                 preferIncomingFolderPath = false
             ).toMutableList()
-            publishTracks(allFound)
+            publishTracks(buildNonDestructiveDisplayList(allFound))
         }
 
         // 3. Scan user-included folders (Storage Access Framework & Local Directories)
-        val foldersSnapshot = _includedFolders.value.toList()
         for (folderUriStr in foldersSnapshot) {
+            val folderName = resolveFolderDisplayName(context, folderUriStr)
             try {
                 val folderTracks = scanFolder(
                     folderUriStr = folderUriStr,
                     mediaStoreTracks = mediaStoreTracks,
-                    onIncrementalBatch = { partialFolderTracks ->
+                    onIncrementalBatch = { partialFolderTracks, persistCheckpoint ->
+                        remainingFolderNames.remove(folderName)
                         val mergedPartial = mergeTracksDeduplicated(
                             baseTracks = allFound,
                             incomingTracks = partialFolderTracks,
                             preferIncomingFolderPath = true
                         )
-                        publishTracks(mergedPartial)
+                        val displayTracks = buildNonDestructiveDisplayList(mergedPartial)
+                        publishTracks(displayTracks)
+                        if (persistCheckpoint) {
+                            cacheStore.saveTagCache(metadataCache)
+                            cacheStore.saveLibraryCache(
+                                fingerprint = scanFingerprint,
+                                tagsComplete = false,
+                                includedFolders = foldersSnapshot,
+                                tracks = _tracks.value,
+                                m3uPlaylists = _m3uPlaylists.value
+                            )
+                        }
                     }
                 )
+                remainingFolderNames.remove(folderName)
                 if (folderTracks.isNotEmpty()) {
                     allFound = mergeTracksDeduplicated(
                         baseTracks = allFound,
                         incomingTracks = folderTracks,
                         preferIncomingFolderPath = true
                     ).toMutableList()
-                    publishTracks(allFound)
+                    val displayTracks = buildNonDestructiveDisplayList(allFound)
+                    publishTracks(displayTracks)
+                    cacheStore.saveTagCache(metadataCache)
+                    cacheStore.saveLibraryCache(
+                        fingerprint = scanFingerprint,
+                        tagsComplete = false,
+                        includedFolders = foldersSnapshot,
+                        tracks = _tracks.value,
+                        m3uPlaylists = _m3uPlaylists.value
+                    )
                 }
             } catch (t: Throwable) {
+                remainingFolderNames.remove(folderName)
                 Log.e("MusicRepository", "Error scanning folder: $folderUriStr", t)
             }
         }
@@ -245,12 +491,258 @@ class MusicRepository(
         // Final publish with favorite status applied
         publishTracks(allFound)
 
-        // 4. Discover and parse .m3u and .m3u8 playlists
+        // Persist tracks, tags, and fingerprint IMMEDIATELY before scanning M3U playlists
+        val finalFingerprint = computeStorageFingerprint()
+        lastKnownFingerprint = finalFingerprint
+        lastKnownTagsComplete = true
+        cacheStore.saveTagCache(metadataCache)
+        cacheStore.saveLibraryCache(
+            fingerprint = finalFingerprint,
+            tagsComplete = true,
+            includedFolders = _includedFolders.value,
+            tracks = _tracks.value,
+            m3uPlaylists = _m3uPlaylists.value
+        )
+
+        // 4. Discover and parse .m3u and .m3u8 playlists, then update cache with playlists
         try {
             val m3uPlaylists = scanM3uPlaylists(_tracks.value)
             _m3uPlaylists.value = m3uPlaylists
+            cacheStore.saveLibraryCache(
+                fingerprint = finalFingerprint,
+                tagsComplete = true,
+                includedFolders = _includedFolders.value,
+                tracks = _tracks.value,
+                m3uPlaylists = m3uPlaylists
+            )
         } catch (t: Throwable) {
             Log.e("MusicRepository", "Error discovering M3U playlists", t)
+        }
+    }
+
+    /**
+     * Computes a fast, deterministic, ORDER-INDEPENDENT signature of:
+     * 1. Current runtime audio permission state
+     * 2. Included folder URIs (sorted)
+     * 3. MediaStore audio table music entries (commutative XOR + SUM over ID/size/dateModified)
+     * 4. Included folders' audio files & directories (commutative XOR + SUM over docId/name/size/lastModified)
+     */
+    fun computeStorageFingerprint(): String {
+        val sb = StringBuilder()
+        val hasPerm = hasAudioReadPermission()
+        sb.append("perm=").append(hasPerm).append(';')
+
+        val sortedFolders = _includedFolders.value.sorted()
+        sb.append("folders=").append(sortedFolders.joinToString("|")).append(';')
+
+        // MediaStore fast order-independent summary (ignoring system/ringtone/notification sounds)
+        try {
+            val collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.DATE_MODIFIED,
+                MediaStore.Audio.Media.SIZE,
+                MediaStore.Audio.Media.DATA,
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.MIME_TYPE,
+                MediaStore.Audio.Media.IS_MUSIC
+            )
+            var count = 0
+            var maxId = 0L
+            var maxModified = 0L
+            var hashXor = 0L
+            var hashSum = 0L
+            context.contentResolver.query(collection, projection, null, null, null)?.use { c ->
+                val idCol = c.getColumnIndex(MediaStore.Audio.Media._ID)
+                val modCol = c.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
+                val sizeCol = c.getColumnIndex(MediaStore.Audio.Media.SIZE)
+                val dataCol = c.getColumnIndex(MediaStore.Audio.Media.DATA)
+                val nameCol = c.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
+                val mimeCol = c.getColumnIndex(MediaStore.Audio.Media.MIME_TYPE)
+                val isMusicCol = c.getColumnIndex(MediaStore.Audio.Media.IS_MUSIC)
+
+                while (c.moveToNext()) {
+                    val id = c.safeLong(idCol) ?: continue
+                    val isMusic = (c.safeInt(isMusicCol) ?: 0) != 0
+                    val path = c.safeString(dataCol)
+                    val displayName = c.safeString(nameCol)
+                    val mime = c.safeString(mimeCol)
+
+                    if (!isMusic) {
+                        if (!isAudioFile(mime, displayName ?: path)) continue
+                        if (isSystemNonMusicPath(path)) continue
+                    }
+
+                    count++
+                    val mod = c.safeLong(modCol) ?: 0L
+                    val sz = c.safeLong(sizeCol) ?: 0L
+                    if (id > maxId) maxId = id
+                    if (mod > maxModified) maxModified = mod
+
+                    val entryHash = LibraryCacheStore.mix64(
+                        id xor (sz * 31L) xor (mod * 131L)
+                    )
+                    hashXor = hashXor xor entryHash
+                    hashSum += entryHash
+                }
+            }
+            sb.append("ms=").append(count).append(':')
+                .append(maxId).append(':')
+                .append(maxModified).append(':')
+                .append(hashXor).append(':')
+                .append(hashSum).append(';')
+        } catch (_: Throwable) {
+            sb.append("ms=err;")
+        }
+
+        // Included folders fast order-independent summary (no MediaMetadataRetriever calls)
+        for (folderUriStr in sortedFolders) {
+            sb.append("f[").append(folderUriStr).append("]=")
+            sb.append(computeFolderSignature(folderUriStr)).append(';')
+        }
+
+        return sb.toString()
+    }
+
+    private fun computeFolderSignature(folderUriStr: String): String {
+        val uri = try {
+            Uri.parse(folderUriStr)
+        } catch (_: Throwable) {
+            return "invalid"
+        }
+
+        // 1. For SAF tree URIs, ALWAYS prefer DocumentsContract first (consistent with scanFolder Strategy 1)
+        if (DocumentsContract.isTreeUri(uri)) {
+            try {
+                val rootDocId = DocumentsContract.getTreeDocumentId(uri)
+                val visited = mutableSetOf<String>()
+                var fileCount = 0
+                var dirCount = 0
+                var maxMod = 0L
+                var totalBytes = 0L
+                var hashXor = 0L
+                var hashSum = 0L
+                var queriedAnyDir = false
+
+                fun walkSaf(docId: String, depth: Int) {
+                    if (depth > 12 || !visited.add(docId)) return
+                    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, docId)
+                    val proj = arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                        DocumentsContract.Document.COLUMN_SIZE
+                    )
+                    context.contentResolver.query(childrenUri, proj, null, null, null)?.use { c ->
+                        queriedAnyDir = true
+                        val idCol = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        val nameCol = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                        val mimeCol = c.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                        val modCol = c.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                        val sizeCol = c.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                        while (c.moveToNext()) {
+                            val childId = c.safeString(idCol) ?: continue
+                            val name = c.safeString(nameCol)
+                            val mime = c.safeString(mimeCol)
+                            val mod = c.safeLong(modCol) ?: 0L
+                            val sz = c.safeLong(sizeCol) ?: 0L
+                            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                                dirCount++
+                                walkSaf(childId, depth + 1)
+                            } else if (isAudioFile(mime, name ?: childId)) {
+                                fileCount++
+                                if (mod > maxMod) maxMod = mod
+                                totalBytes += sz
+                                val entryHash = LibraryCacheStore.mix64(
+                                    childId.hashCode().toLong() xor (sz * 31L) xor (mod * 131L)
+                                )
+                                hashXor = hashXor xor entryHash
+                                hashSum += entryHash
+                            }
+                        }
+                    }
+                }
+
+                walkSaf(rootDocId, 0)
+                if (queriedAnyDir) {
+                    return "saf:$fileCount:$dirCount:$maxMod:$totalBytes:$hashXor:$hashSum"
+                }
+            } catch (_: Throwable) {}
+        }
+
+        // 2. Direct Java File traversal for file:// URIs or readable mapped directories
+        val localDir = resolveLocalDirectoryFromUri(uri)
+        if (localDir != null && localDir.exists() && localDir.canRead()) {
+            var fileCount = 0
+            var dirCount = 0
+            var maxMod = 0L
+            var totalBytes = 0L
+            var hashXor = 0L
+            var hashSum = 0L
+
+            fun walkDir(dir: File, depth: Int) {
+                if (depth > 12) return
+                val children = dir.listFiles() ?: return
+                for (child in children) {
+                    if (child.isDirectory) {
+                        dirCount++
+                        walkDir(child, depth + 1)
+                    } else if (child.isFile && isAudioFile(null, child.name)) {
+                        fileCount++
+                        val cMod = child.lastModified()
+                        val cLen = child.length()
+                        if (cMod > maxMod) maxMod = cMod
+                        totalBytes += cLen
+                        val entryHash = LibraryCacheStore.mix64(
+                            child.absolutePath.hashCode().toLong() xor (cLen * 31L) xor (cMod * 131L)
+                        )
+                        hashXor = hashXor xor entryHash
+                        hashSum += entryHash
+                    }
+                }
+            }
+
+            walkDir(localDir, 0)
+            return "local:$fileCount:$dirCount:$maxMod:$totalBytes:$hashXor:$hashSum"
+        }
+
+        // 3. Fallback to DocumentFile
+        return try {
+            val doc = DocumentFile.fromTreeUri(context, uri)
+            if (doc != null) {
+                val children = doc.listFiles()
+                "doc:${children.size}:${doc.lastModified()}"
+            } else {
+                "unknown"
+            }
+        } catch (_: Throwable) {
+            "unknown"
+        }
+    }
+
+    private fun isSystemNonMusicPath(path: String?): Boolean {
+        if (path.isNullOrBlank()) return false
+        val lowerPath = path.lowercase()
+        return lowerPath.startsWith("/system/") ||
+            lowerPath.startsWith("/product/") ||
+            lowerPath.startsWith("/apex/") ||
+            lowerPath.contains("/ringtones/") ||
+            lowerPath.contains("/notifications/") ||
+            lowerPath.contains("/alarms/") ||
+            lowerPath.contains("/ui/")
+    }
+
+    private fun hasAudioReadPermission(): Boolean {
+        val perm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        return try {
+            ContextCompat.checkSelfPermission(context, perm) == PackageManager.PERMISSION_GRANTED
+        } catch (_: Throwable) {
+            false
         }
     }
 
@@ -269,14 +761,12 @@ class MusicRepository(
         }
 
         for (volumeUri in volumes) {
-            // First query tracks marked IS_MUSIC != 0
             val musicFlagTracks = queryMediaStoreVolume(volumeUri, onlyIsMusic = true)
             for (t in musicFlagTracks) {
                 if (discovered.none { isSameTrack(it, t) }) {
                     discovered.add(t)
                 }
             }
-            // Also query without IS_MUSIC filter to catch valid music files where OEM MediaScanner left IS_MUSIC == 0
             val allAudioTracks = queryMediaStoreVolume(volumeUri, onlyIsMusic = false)
             for (t in allAudioTracks) {
                 if (discovered.none { isSameTrack(it, t) }) {
@@ -380,20 +870,9 @@ class MusicRepository(
                                 ?: path?.substringAfterLast('/')
                             val mimeType = c.safeString(mimeCol)?.takeIf { it.isNotBlank() } ?: "audio/mpeg"
 
-                            // Skip system internal sounds / ringtones / notifications when scanning broad audio table
                             if (!onlyIsMusic) {
                                 if (!isAudioFile(mimeType, displayName ?: path)) continue
-                                val lowerPath = (path ?: "").lowercase()
-                                if (lowerPath.startsWith("/system/") ||
-                                    lowerPath.startsWith("/product/") ||
-                                    lowerPath.startsWith("/apex/") ||
-                                    lowerPath.contains("/ringtones/") ||
-                                    lowerPath.contains("/notifications/") ||
-                                    lowerPath.contains("/alarms/") ||
-                                    lowerPath.contains("/ui/")
-                                ) {
-                                    continue
-                                }
+                                if (isSystemNonMusicPath(path)) continue
                             }
 
                             val rawTitle = c.safeString(titleCol)?.takeIf { it.isNotBlank() }
@@ -479,7 +958,7 @@ class MusicRepository(
     private suspend fun scanFolder(
         folderUriStr: String,
         mediaStoreTracks: List<Track> = emptyList(),
-        onIncrementalBatch: ((List<Track>) -> Unit)? = null
+        onIncrementalBatch: ((List<Track>, Boolean) -> Unit)? = null
     ): List<Track> {
         val uri = try {
             Uri.parse(folderUriStr)
@@ -656,7 +1135,7 @@ class MusicRepository(
                 fp.startsWith(prefix, ignoreCase = true)
             }.map { it.copy(folderPath = rootFolderName) }
             if (matchedFromMediaStore.isNotEmpty()) {
-                onIncrementalBatch?.invoke(matchedFromMediaStore)
+                onIncrementalBatch?.invoke(matchedFromMediaStore, true)
                 return matchedFromMediaStore
             }
         }
@@ -709,24 +1188,49 @@ class MusicRepository(
             }
         }
 
-        // Emit Phase 1 tracks immediately so UI populates within ~100ms
-        onIncrementalBatch?.invoke(tracks.toList())
+        // Emit AND PERSIST Phase 1 tracks immediately so killing the app never loses discovered folders!
+        onIncrementalBatch?.invoke(tracks.toList(), true)
 
-        // Phase 2: Refine ID3/Vorbis metadata with bounded timeouts & safe retriever release
-        for ((batchCount, idx) in indicesNeedingTagExtraction.withIndex()) {
-            val entry = discoveredEntries[idx]
-            val uriStr = entry.fileUri.toString()
-            val extracted = extractMetadataSafely(entry.fileUri)
-            if (extracted != null) {
-                metadataCache[uriStr] = extracted
-                tracks[idx] = buildTrackFromEntryAndMetadata(
-                    entry = entry,
-                    rootFolderName = rootFolderName,
-                    cached = extracted
-                )
-            }
-            if ((batchCount + 1) % 20 == 0) {
-                onIncrementalBatch?.invoke(tracks.toList())
+        // Phase 2: Refine ID3/Vorbis metadata with bounded concurrency (4 workers) & periodic disk checkpoints
+        if (indicesNeedingTagExtraction.isNotEmpty()) {
+            val semaphore = Semaphore(4)
+            for (chunk in indicesNeedingTagExtraction.chunked(24)) {
+                val results = coroutineScope {
+                    chunk.map { idx ->
+                        async(Dispatchers.IO) {
+                            semaphore.withPermit {
+                                val entry = discoveredEntries[idx]
+                                idx to extractMetadataSafely(entry.fileUri)
+                            }
+                        }
+                    }.awaitAll()
+                }
+                for ((idx, extracted) in results) {
+                    val entry = discoveredEntries[idx]
+                    val uriStr = entry.fileUri.toString()
+                    if (extracted != null) {
+                        metadataCache[uriStr] = extracted
+                        tracks[idx] = buildTrackFromEntryAndMetadata(
+                            entry = entry,
+                            rootFolderName = rootFolderName,
+                            cached = extracted
+                        )
+                    } else {
+                        // Cache fallback entry so unreadable/corrupt files aren't retried endlessly
+                        val fallbackTrack = tracks[idx]
+                        metadataCache[uriStr] = CachedTagMetadata(
+                            title = fallbackTrack.title,
+                            artist = fallbackTrack.artist,
+                            album = fallbackTrack.album,
+                            genre = fallbackTrack.genre,
+                            durationMs = fallbackTrack.durationMs,
+                            cdTrackTag = null,
+                            discTag = null,
+                            mimeType = fallbackTrack.mimeType
+                        )
+                    }
+                }
+                onIncrementalBatch?.invoke(tracks.toList(), true)
             }
         }
 
@@ -878,7 +1382,6 @@ class MusicRepository(
             _includedFolders.value = current
             saveIncludedFolders(current)
         }
-        // Always trigger a library rescan even if the user re-selected an already included folder
         scope.launch { rescanLibrary() }
     }
 
@@ -896,9 +1399,22 @@ class MusicRepository(
     fun removeIncludedFolder(folderUriStr: String) {
         val current = _includedFolders.value.toMutableList()
         if (current.remove(folderUriStr)) {
+            val removedFolderName = resolveFolderDisplayName(context, folderUriStr)
             _includedFolders.value = current
             saveIncludedFolders(current)
-            scope.launch { rescanLibrary() }
+            val remaining = _tracks.value.filterNot { it.folderPath == removedFolderName }
+            _tracks.value = remaining
+            // Persist updated folder list & remaining tracks immediately
+            scope.launch(Dispatchers.IO) {
+                cacheStore.saveLibraryCache(
+                    fingerprint = "",
+                    tagsComplete = lastKnownTagsComplete,
+                    includedFolders = current,
+                    tracks = remaining,
+                    m3uPlaylists = _m3uPlaylists.value
+                )
+                rescanLibrary()
+            }
         }
     }
 
@@ -1002,7 +1518,6 @@ class MusicRepository(
             }
         }
 
-        // 1. App internal files (sample_music and imported_m3u)
         val sampleDir = File(context.filesDir, "sample_music")
         if (sampleDir.exists()) {
             sampleDir.listFiles()?.filter {
@@ -1016,7 +1531,6 @@ class MusicRepository(
             }?.forEach { processM3uFile(it) }
         }
 
-        // 2. Query MediaStore for .m3u / .m3u8 files
         try {
             val projection = arrayOf(
                 MediaStore.Files.FileColumns._ID,
@@ -1044,7 +1558,6 @@ class MusicRepository(
             Log.w("MusicRepository", "MediaStore M3U query warning", e)
         }
 
-        // 3. Scan user-included folders
         for (folderUriStr in _includedFolders.value) {
             try {
                 val uri = Uri.parse(folderUriStr)
@@ -1079,7 +1592,6 @@ class MusicRepository(
             }
         }
 
-        // 4. External public Music folder (if accessible)
         try {
             val publicMusic = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
             if (publicMusic?.exists() == true) {
@@ -1153,18 +1665,24 @@ class MusicRepository(
 
     private fun loadIncludedFolders(): List<String> {
         val json = prefs.getString("included_folders", "[]") ?: "[]"
-        val array = JSONArray(json)
-        val list = mutableListOf<String>()
-        for (i in 0 until array.length()) {
-            list.add(array.getString(i))
+        return try {
+            val array = JSONArray(json)
+            val list = mutableListOf<String>()
+            for (i in 0 until array.length()) {
+                val uri = array.optString(i, "")
+                if (uri.isNotBlank()) list.add(uri)
+            }
+            list
+        } catch (_: Throwable) {
+            emptyList()
         }
-        return list
     }
 
     private fun saveIncludedFolders(folders: List<String>) {
         val array = JSONArray()
         folders.forEach { array.put(it) }
-        prefs.edit().putString("included_folders", array.toString()).apply()
+        // Use synchronous commit() so folder selection survives immediate app kill
+        prefs.edit().putString("included_folders", array.toString()).commit()
     }
 
     private fun loadPlaylists(): List<Playlist> {
@@ -1418,7 +1936,6 @@ class MusicRepository(
             var discNum: Int? = null
             var trackNum: Int? = null
 
-            // 1. Parse track number from MediaStore TRACK column or CD_TRACK_NUMBER tag
             if (rawTrackColumn != null && rawTrackColumn > 0) {
                 val t = if (rawTrackColumn >= 1000) rawTrackColumn % 1000 else rawTrackColumn
                 if (t > 0) {
@@ -1433,7 +1950,6 @@ class MusicRepository(
                 }
             }
 
-            // 2. Parse disc number from explicit DISC_NUMBER tag or 1000-encoded TRACK column (e.g. 2001 -> disc 2, track 1)
             val parsedDiscTag = parseTagPositiveInt(discNumberTag)
             if (parsedDiscTag != null && parsedDiscTag > 0) {
                 discNum = parsedDiscTag
@@ -1449,7 +1965,6 @@ class MusicRepository(
                 }
             }
 
-            // 3. Fallback: check parent folder name or file path for "Disc 2", "CD2", "Disk 2", etc.
             if (discNum == null) {
                 val folderMatch = parentFolderName?.let { DISC_FOLDER_REGEX.find(it) }
                     ?: filePathOrName?.let { DISC_FOLDER_REGEX.find(it) }
@@ -1459,7 +1974,6 @@ class MusicRepository(
                 }
             }
 
-            // 4. Fallback: check base filename for "1-01 Song.mp3" / "2-01 Song.mp3" or leading track number
             val baseFileName = filePathOrName
                 ?.substringAfterLast('/')
                 ?.substringAfterLast('\\')
@@ -1480,7 +1994,6 @@ class MusicRepository(
                     val rawLead = leadMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
                     if (rawLead != null && rawLead > 0) {
                         if (rawLead >= 100 && discNum == null) {
-                            // e.g. "101 - Track" or "201 - Track"
                             discNum = rawLead / 100
                             val t = rawLead % 100
                             if (t > 0) trackNum = t

@@ -25,7 +25,7 @@ import org.anmon.ui.theme.AppTheme
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val themePrefs = application.getSharedPreferences("aura_theme_prefs", Context.MODE_PRIVATE)
 
-    val repository = MusicRepository(application, viewModelScope)
+    val repository = org.anmon.data.MusicRepositoryProvider.get(application)
     val playbackManager: org.anmon.playback.PlaybackManager
         get() = org.anmon.playback.PlaybackManagerProvider.get(getApplication())
 
@@ -176,6 +176,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _snackbarMessage.value = "Scanning library for audio files..."
             repository.rescanLibrary()
             _snackbarMessage.value = "Library refreshed (${repository.tracks.value.size} tracks)"
+        }
+    }
+
+    fun onPermissionsUpdated() {
+        viewModelScope.launch {
+            repository.ensureLibraryUpToDate()
         }
     }
 
